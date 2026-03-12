@@ -53,7 +53,8 @@ Application web en francais pour:
 
 ## 5. Base de Donnees
 Mode persistance:
-- `SUPABASE_DB_URL` defini -> stockage `PostgreSQL` (Supabase)
+- `SUPABASE_DB_URL` defini -> stockage prefere `PostgreSQL` (connexion SQL directe)
+- si la connexion SQL directe echoue et que `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` sont definis -> fallback automatique `Supabase REST`
 - sinon -> stockage `SQLite`
 
 SQLite par defaut:
@@ -133,6 +134,14 @@ Principes appliques:
   - support natif `SUPABASE_DB_URL` (PostgreSQL) pour `/api/workspace`,
   - creation automatique de la table `workspace_state` sur Supabase,
   - fallback SQLite si `SUPABASE_DB_URL` n'est pas defini.
+- Optimisation extraction:
+  - chemin rapide via parser texte pour gros PDF avant extraction tables,
+  - reduction du risque de timeout en hebergement.
+- Diagnostic production:
+  - `/api/workspace` retourne un `detail` d'erreur BDD (tronque) en cas d'indisponibilite.
+- Fiabilisation stockage Supabase en production:
+  - fallback automatique du mode PostgreSQL vers Supabase REST si le TCP direct est indisponible (cas frequent Render/IPv6),
+  - `storage_backend` et `preferred_storage_backend` retournes par `/api/workspace` pour diagnostic rapide.
 
 ---
 

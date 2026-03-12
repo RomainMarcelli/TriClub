@@ -64,6 +64,37 @@ vercel
 vercel --prod
 ```
 
+## Render (Recommended)
+
+Use this start command to avoid worker timeout on long PDF extraction:
+
+```bash
+gunicorn app:app --timeout 180 --workers 1 --threads 2
+```
+
+Set these environment variables on Render:
+
+- `APP_SECRET_KEY`
+- `SUPABASE_DB_URL` (optional if direct Postgres access works)
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+
+Storage behavior:
+
+- preferred: direct Postgres (`SUPABASE_DB_URL`)
+- automatic fallback: Supabase REST (`SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY`)
+
+Quick check:
+
+```bash
+https://<your-app>/api/workspace
+```
+
+Expected when storage is healthy:
+
+- `"exists": true` or `"exists": false` (if no data yet)
+- no `"warning": "workspace_storage_unavailable"`
+
 ## API Endpoints
 
 - `POST /api/extract` - upload PDF and get detected table + preview + mapping hints

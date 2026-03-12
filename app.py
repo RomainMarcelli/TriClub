@@ -8,6 +8,8 @@ import secrets
 import sqlite3
 import threading
 import unicodedata
+import urllib.error
+import urllib.request
 import zlib
 from datetime import datetime, timezone
 from typing import Any
@@ -54,7 +56,20 @@ TARGET_FIELDS_NORMALIZED = ["nom club", "ligue", "cd"]
 MAX_SHARE_RAW_BYTES = 700_000
 ALLOWED_FILTER_OPERATORS = {"equals", "contains", "starts_with", "is_empty", "is_not_empty"}
 SUPABASE_DB_URL = os.environ.get("SUPABASE_DB_URL", "").strip()
-DB_BACKEND = "postgres" if SUPABASE_DB_URL else "sqlite"
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+HAS_SUPABASE_REST = bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
+if SUPABASE_DB_URL:
+    DB_BACKEND = "postgres"
+elif HAS_SUPABASE_REST:
+    DB_BACKEND = "supabase_rest"
+else:
+    DB_BACKEND = "sqlite"
+STORAGE_BACKEND_LAST = DB_BACKEND
+try:
+    SUPABASE_HTTP_TIMEOUT = max(3.0, float(os.environ.get("SUPABASE_HTTP_TIMEOUT", "12")))
+except ValueError:
+    SUPABASE_HTTP_TIMEOUT = 12.0
 DB_PATH = os.environ.get("BEN_DB_PATH", os.path.join(os.path.dirname(__file__), "data", "ben_workspace.db"))
 DB_FALLBACK_PATH = os.path.join("/tmp", "ben_workspace.db")
 DB_ACTIVE_PATH = DB_PATH
@@ -68,6 +83,15 @@ FFR_IGNORE_PREFIXES = (
     "Club",
     "FFR-DS",
 )
+
+
+def set_storage_backend(name: str) -> None:
+    global STORAGE_BACKEND_LAST
+    STORAGE_BACKEND_LAST = name
+
+
+def get_storage_backend() -> str:
+    return STORAGE_BACKEND_LAST or DB_BACKEND
 
 
 def normalize_text(value: Any) -> str:
@@ -524,11 +548,71 @@ def ensure_postgres_database() -> None:
                 )
 
 
+def supabase_rest_request(
+    method: str,
+    path_with_query: str,
+    payload: Any | None = None,
+    prefer: str | None = None,
+) -> Any:
+    if not HAS_SUPABASE_REST:
+        raise RuntimeError("SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY manquants pour le mode REST.")
+
+    url = f"{SUPABASE_URL}/rest/v1/{path_with_query.lstrip('/')}"
+    headers = {
+        "apikey": SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+        "Accept": "application/json",
+    }
+    if prefer:
+        headers["Prefer"] = prefer
+
+    body = None
+    if payload is not None:
+        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+
+    request_obj = urllib.request.Request(url=url, data=body, headers=headers, method=method.upper())
+    try:
+        with urllib.request.urlopen(request_obj, timeout=SUPABASE_HTTP_TIMEOUT) as response:
+            raw = response.read().decode("utf-8", errors="replace").strip()
+    except urllib.error.HTTPError as error:
+        error_body = error.read().decode("utf-8", errors="replace")
+        detail = clean_cell(error_body) or clean_cell(error.reason)
+        raise RuntimeError(f"Supabase REST HTTP {error.code}: {detail[:260]}") from error
+    except urllib.error.URLError as error:
+        raise RuntimeError(f"Supabase REST inaccessible: {clean_cell(error.reason or error)}") from error
+
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+
+
+def ensure_supabase_rest_database() -> None:
+    supabase_rest_request("GET", "workspace_state?select=id&limit=1")
+
+
 def ensure_database() -> None:
     if DB_BACKEND == "postgres":
-        ensure_postgres_database()
+        try:
+            ensure_postgres_database()
+            set_storage_backend("postgres")
+            return
+        except Exception as error:
+            if not HAS_SUPABASE_REST:
+                raise
+            app.logger.warning("Postgres direct inaccessible, fallback Supabase REST: %s", error)
+            ensure_supabase_rest_database()
+            set_storage_backend("supabase_rest")
+            return
+    if DB_BACKEND == "supabase_rest":
+        ensure_supabase_rest_database()
+        set_storage_backend("supabase_rest")
         return
     ensure_sqlite_database()
+    set_storage_backend("sqlite")
 
 
 def decode_workspace_payload(raw_payload: Any) -> dict[str, Any] | None:
@@ -553,6 +637,7 @@ def decode_workspace_payload(raw_payload: Any) -> dict[str, Any] | None:
 
 def load_workspace_state_sqlite() -> dict[str, Any] | None:
     ensure_sqlite_database()
+    set_storage_backend("sqlite")
     with DB_LOCK:
         with sqlite3.connect(DB_ACTIVE_PATH) as conn:
             row = conn.execute("SELECT payload FROM workspace_state WHERE id = 1").fetchone()
@@ -569,6 +654,7 @@ def load_workspace_state_sqlite() -> dict[str, Any] | None:
 
 def load_workspace_state_postgres() -> dict[str, Any] | None:
     ensure_postgres_database()
+    set_storage_backend("postgres")
     with DB_LOCK:
         with psycopg.connect(SUPABASE_DB_URL) as conn:
             with conn.cursor() as cur:
@@ -585,14 +671,38 @@ def load_workspace_state_postgres() -> dict[str, Any] | None:
     return sanitize_workspace_state(data)
 
 
+def load_workspace_state_supabase_rest() -> dict[str, Any] | None:
+    ensure_supabase_rest_database()
+    set_storage_backend("supabase_rest")
+    rows = supabase_rest_request("GET", "workspace_state?select=payload&id=eq.1&limit=1")
+    if not isinstance(rows, list) or not rows:
+        return None
+
+    first = rows[0] if isinstance(rows[0], dict) else {}
+    data = decode_workspace_payload(first.get("payload"))
+    if data is None:
+        return None
+
+    return sanitize_workspace_state(data)
+
+
 def load_workspace_state() -> dict[str, Any] | None:
     if DB_BACKEND == "postgres":
-        return load_workspace_state_postgres()
+        try:
+            return load_workspace_state_postgres()
+        except Exception as error:
+            if not HAS_SUPABASE_REST:
+                raise
+            app.logger.warning("Workspace load Postgres failed, fallback REST: %s", error)
+            return load_workspace_state_supabase_rest()
+    if DB_BACKEND == "supabase_rest":
+        return load_workspace_state_supabase_rest()
     return load_workspace_state_sqlite()
 
 
 def save_workspace_state_sqlite(workspace: dict[str, Any]) -> str:
     ensure_sqlite_database()
+    set_storage_backend("sqlite")
     payload = json.dumps(workspace, ensure_ascii=False, separators=(",", ":"))
     updated_at = datetime.now(timezone.utc).isoformat()
 
@@ -615,6 +725,7 @@ def save_workspace_state_sqlite(workspace: dict[str, Any]) -> str:
 
 def save_workspace_state_postgres(workspace: dict[str, Any]) -> str:
     ensure_postgres_database()
+    set_storage_backend("postgres")
     payload = json.dumps(workspace, ensure_ascii=False, separators=(",", ":"))
 
     with DB_LOCK:
@@ -643,9 +754,37 @@ def save_workspace_state_postgres(workspace: dict[str, Any]) -> str:
     return clean_cell(row[0])
 
 
+def save_workspace_state_supabase_rest(workspace: dict[str, Any]) -> str:
+    ensure_supabase_rest_database()
+    set_storage_backend("supabase_rest")
+    updated_at = datetime.now(timezone.utc).isoformat()
+    payload = [{"id": 1, "payload": workspace, "updated_at": updated_at}]
+
+    rows = supabase_rest_request(
+        "POST",
+        "workspace_state?on_conflict=id&select=updated_at",
+        payload=payload,
+        prefer="resolution=merge-duplicates,return=representation",
+    )
+
+    if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+        raw_updated_at = rows[0].get("updated_at")
+        if raw_updated_at:
+            return clean_cell(raw_updated_at)
+    return updated_at
+
+
 def save_workspace_state(workspace: dict[str, Any]) -> str:
     if DB_BACKEND == "postgres":
-        return save_workspace_state_postgres(workspace)
+        try:
+            return save_workspace_state_postgres(workspace)
+        except Exception as error:
+            if not HAS_SUPABASE_REST:
+                raise
+            app.logger.warning("Workspace save Postgres failed, fallback REST: %s", error)
+            return save_workspace_state_supabase_rest(workspace)
+    if DB_BACKEND == "supabase_rest":
+        return save_workspace_state_supabase_rest(workspace)
     return save_workspace_state_sqlite(workspace)
 
 
@@ -676,14 +815,20 @@ def api_extract():
         return jsonify({"error": "Le fichier doit etre au format PDF."}), 400
 
     try:
-        tables = extract_candidate_tables(pdf_file)
+        # Fast path for large federation-style PDFs:
+        # text-line parsing is usually much faster than full table extraction.
         line_candidate = extract_candidate_lines(pdf_file)
-        if line_candidate:
-            tables.append(line_candidate)
+        if line_candidate and len(line_candidate.get("rows", [])) >= 20:
+            tables = [line_candidate]
+            best_table = line_candidate
+        else:
+            tables = extract_candidate_tables(pdf_file)
+            if line_candidate:
+                tables.append(line_candidate)
+            best_table = pick_best_table(tables)
     except Exception:
         return jsonify({"error": "Impossible de lire ce PDF."}), 400
 
-    best_table = pick_best_table(tables)
     if not best_table:
         return jsonify({"error": "Aucune table exploitable n'a ete detectee dans ce PDF."}), 404
 
@@ -786,18 +931,32 @@ def api_workspace_get():
                     "workspace": None,
                     "exists": False,
                     "warning": "workspace_storage_unavailable",
-                    "storage_backend": DB_BACKEND,
-                    "hint": "Verifie SUPABASE_DB_URL (format) et la connectivite BDD.",
+                    "storage_backend": get_storage_backend(),
+                    "preferred_storage_backend": DB_BACKEND,
+                    "hint": "Verifie SUPABASE_DB_URL ou SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY et la connectivite.",
+                    "detail": clean_cell(str(error))[:260],
                 }
             ),
             200,
         )
 
     if workspace is None:
-        return jsonify({"workspace": None, "exists": False, "storage_backend": DB_BACKEND})
+        return jsonify(
+            {
+                "workspace": None,
+                "exists": False,
+                "storage_backend": get_storage_backend(),
+                "preferred_storage_backend": DB_BACKEND,
+            }
+        )
 
-    response = {"workspace": workspace, "exists": True, "storage_backend": DB_BACKEND}
-    if DB_BACKEND == "sqlite":
+    response = {
+        "workspace": workspace,
+        "exists": True,
+        "storage_backend": get_storage_backend(),
+        "preferred_storage_backend": DB_BACKEND,
+    }
+    if get_storage_backend() == "sqlite":
         response["db_path"] = DB_ACTIVE_PATH
     return jsonify(response)
 
@@ -813,7 +972,17 @@ def api_workspace_post():
         updated_at = save_workspace_state(workspace)
     except Exception as error:
         app.logger.exception("Workspace save failed: %s", error)
-        return jsonify({"error": "Sauvegarde indisponible (BDD inaccessible). Verifie SUPABASE_DB_URL."}), 503
+        return (
+            jsonify(
+                {
+                    "error": "Sauvegarde indisponible (BDD inaccessible). Verifie la config Supabase.",
+                    "detail": clean_cell(str(error))[:260],
+                    "storage_backend": get_storage_backend(),
+                    "preferred_storage_backend": DB_BACKEND,
+                }
+            ),
+            503,
+        )
 
     return jsonify({"status": "saved", "updated_at": updated_at})
 
