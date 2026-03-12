@@ -21,6 +21,29 @@ try:
 except ImportError:  # pragma: no cover - optional dependency in local dev
     psycopg = None
 
+
+def load_local_env_file(path: str = ".env") -> None:
+    if not os.path.exists(path):
+        return
+
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                row = line.strip()
+                if not row or row.startswith("#") or "=" not in row:
+                    continue
+                key, value = row.split("=", 1)
+                key = key.strip()
+                if not key:
+                    continue
+                # Do not override vars already provided by the runtime (Render, shell, etc.).
+                os.environ.setdefault(key, value.strip().strip('"').strip("'"))
+    except OSError:
+        return
+
+
+load_local_env_file()
+
 app = Flask(__name__)
 app.secret_key = os.environ.get("APP_SECRET_KEY", secrets.token_hex(16))
 app.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024  # 20 MB
@@ -764,6 +787,7 @@ def api_workspace_get():
                     "exists": False,
                     "warning": "workspace_storage_unavailable",
                     "storage_backend": DB_BACKEND,
+                    "hint": "Verifie SUPABASE_DB_URL (format) et la connectivite BDD.",
                 }
             ),
             200,
@@ -789,7 +813,7 @@ def api_workspace_post():
         updated_at = save_workspace_state(workspace)
     except Exception as error:
         app.logger.exception("Workspace save failed: %s", error)
-        return jsonify({"error": "Sauvegarde indisponible (BDD inaccessible)."}), 503
+        return jsonify({"error": "Sauvegarde indisponible (BDD inaccessible). Verifie SUPABASE_DB_URL."}), 503
 
     return jsonify({"status": "saved", "updated_at": updated_at})
 
