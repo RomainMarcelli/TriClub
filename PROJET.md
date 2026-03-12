@@ -49,6 +49,10 @@ Application web en francais pour:
 - Recherche globale instantanee.
 - Partage par lien signe (lecture seule).
 - Export CSV (table complete ou vue filtree).
+- Export configurable:
+  - source: tableau complet ou vue filtree,
+  - nombre de lignes exportees (limite),
+  - format: CSV standard ou CSV compatible Numbers.
 - Sauvegarde automatique en BDD et rechargement automatique au demarrage.
 
 ## 5. Base de Donnees
@@ -142,6 +146,18 @@ Principes appliques:
 - Fiabilisation stockage Supabase en production:
   - fallback automatique du mode PostgreSQL vers Supabase REST si le TCP direct est indisponible (cas frequent Render/IPv6),
   - `storage_backend` et `preferred_storage_backend` retournes par `/api/workspace` pour diagnostic rapide.
+- Responsive UI:
+  - interface adaptee mobile/tablette/desktop (breakpoints 1100/900/700/480),
+  - modales en mode "bottom sheet" sur mobile,
+  - toolbar/filtres/boutons optimises pour petit ecran.
+- En-tetes tableau simplifiees:
+  - suppression de l'affichage du type de colonne (ex: `text`) dans les en-tetes.
+- Export avance:
+  - ajout d'un modal unique d'export (format/source/limite de lignes/nom de fichier),
+  - ajout du format `Numbers (CSV compatible)` explicite.
+- Reorganisation simple des colonnes:
+  - dans `Gerer les colonnes`, ajout de boutons `Monter` / `Descendre`,
+  - affichage de la position courante de la colonne (ex: `2 / 5`).
 
 ---
 

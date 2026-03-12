@@ -94,7 +94,6 @@ export class VirtualGrid {
               <span>${escapeHtml(col.name)}</span>
               <span class="sort-indicator">${sortIndicator}</span>
             </button>
-            <span class="type-pill">${escapeHtml(col.type)}</span>
             <span class="col-resizer" data-resize-col="${escapeHtml(col.id)}"></span>
           </th>
         `;

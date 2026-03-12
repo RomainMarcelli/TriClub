@@ -22,6 +22,8 @@ Modern SaaS-style web app to extract structured data from PDF and manage it like
 - Export:
   - full table
   - filtered view
+  - choose number of rows to export
+  - CSV standard
   - CSV compatible with Apple Numbers
 - Share a read-only view via public link
 

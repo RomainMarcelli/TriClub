@@ -680,11 +680,19 @@ export class WorkspaceStore {
     });
   }
 
-  buildExportPayload({ filteredOnly = false, includeHidden = true, filename = "export_numbers" } = {}) {
+  buildExportPayload({
+    filteredOnly = false,
+    includeHidden = true,
+    rowLimit = null,
+    filename = "export_numbers",
+    format = "numbers_csv",
+  } = {}) {
     const columns = includeHidden ? this.state.columns.slice() : this.getColumns({ includeHidden: false });
     const sourceRows = filteredOnly ? this.getProcessedRows() : this.state.rows;
+    const safeLimit = Number.isFinite(Number(rowLimit)) && Number(rowLimit) > 0 ? Math.floor(Number(rowLimit)) : null;
+    const limitedRows = safeLimit ? sourceRows.slice(0, safeLimit) : sourceRows;
 
-    const payloadRows = sourceRows.map((row) => {
+    const payloadRows = limitedRows.map((row) => {
       const values = {};
       columns.forEach((col) => {
         values[col.id] = asString(row.values[col.id] ?? "");
@@ -694,6 +702,7 @@ export class WorkspaceStore {
 
     return {
       filename,
+      format,
       columns: columns.map((col) => ({
         id: col.id,
         name: col.name,

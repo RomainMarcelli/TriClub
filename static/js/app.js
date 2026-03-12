@@ -62,13 +62,20 @@ const dom = {
   editValeurParDefaut: document.getElementById("editValeurParDefaut"),
   editLargeurColonne: document.getElementById("editLargeurColonne"),
   editOptionsColonne: document.getElementById("editOptionsColonne"),
+  btnMonterColonne: document.getElementById("btnMonterColonne"),
+  btnDescendreColonne: document.getElementById("btnDescendreColonne"),
+  infoPositionColonne: document.getElementById("infoPositionColonne"),
   enregistrerColonne: document.getElementById("enregistrerColonne"),
   supprimerColonne: document.getElementById("supprimerColonne"),
 
   modalExport: document.getElementById("modalExport"),
   fermerExport: document.getElementById("fermerExport"),
-  exporterTout: document.getElementById("exporterTout"),
-  exporterFiltres: document.getElementById("exporterFiltres"),
+  exportScope: document.getElementById("exportScope"),
+  exportFormat: document.getElementById("exportFormat"),
+  exportRowCount: document.getElementById("exportRowCount"),
+  exportRowsInfo: document.getElementById("exportRowsInfo"),
+  exportFilename: document.getElementById("exportFilename"),
+  exporterMaintenant: document.getElementById("exporterMaintenant"),
 
   modalPartage: document.getElementById("modalPartage"),
   fermerPartage: document.getElementById("fermerPartage"),
@@ -598,6 +605,8 @@ function remplirFormulaireEditionColonne(colonne) {
   dom.editTypeColonne.disabled = !hasColumn;
   dom.editValeurParDefaut.disabled = !hasColumn;
   dom.editLargeurColonne.disabled = !hasColumn;
+  dom.btnMonterColonne.disabled = !hasColumn;
+  dom.btnDescendreColonne.disabled = !hasColumn;
   dom.enregistrerColonne.disabled = !hasColumn;
   dom.supprimerColonne.disabled = !hasColumn;
 
@@ -608,6 +617,9 @@ function remplirFormulaireEditionColonne(colonne) {
     dom.editLargeurColonne.value = "180";
     dom.editOptionsColonne.value = "";
     dom.editOptionsColonne.disabled = true;
+    if (dom.infoPositionColonne) {
+      dom.infoPositionColonne.textContent = "";
+    }
     return;
   }
 
@@ -617,6 +629,46 @@ function remplirFormulaireEditionColonne(colonne) {
   dom.editLargeurColonne.value = String(colonne.width || 180);
   dom.editOptionsColonne.value = (colonne.options || []).join(", ");
   dom.editOptionsColonne.disabled = colonne.type !== "dropdown";
+
+  const columns = store.getColumns({ includeHidden: true });
+  const index = columns.findIndex((item) => item.id === colonne.id);
+  const total = columns.length;
+  const isFirst = index <= 0;
+  const isLast = index < 0 || index >= total - 1;
+  dom.btnMonterColonne.disabled = isFirst;
+  dom.btnDescendreColonne.disabled = isLast;
+  if (dom.infoPositionColonne) {
+    dom.infoPositionColonne.textContent = index >= 0 ? `Position: ${index + 1} / ${total}` : "";
+  }
+}
+
+function deplacerColonneSelectionnee(step) {
+  const col = store.getSelectedColumn();
+  if (!col) {
+    return;
+  }
+
+  const columns = store.getColumns({ includeHidden: true });
+  const index = columns.findIndex((item) => item.id === col.id);
+  if (index < 0) {
+    return;
+  }
+
+  const targetIndex = index + step;
+  if (targetIndex < 0 || targetIndex >= columns.length) {
+    return;
+  }
+
+  const target = columns[targetIndex];
+  if (!target) {
+    return;
+  }
+
+  store.reorderColumns(col.id, target.id);
+  const selectedId = col.id;
+  remplirSelectColonnesEdition(selectedId);
+  store.setSelectedColumn(selectedId);
+  remplirFormulaireEditionColonne(store.getSelectedColumn());
 }
 
 function ouvrirModalEditionColonne(columnId = "") {
@@ -708,16 +760,65 @@ function telechargerBlob(blob, filename) {
   URL.revokeObjectURL(url);
 }
 
-async function exporter({ filtreSeulement }) {
+function getExportScope() {
+  return dom.exportScope?.value === "filtered" ? "filtered" : "all";
+}
+
+function getRowsDisponiblesPourExport(scope = "all") {
+  return scope === "filtered" ? store.getProcessedRows().length : store.state.rows.length;
+}
+
+function actualiserInfosExport() {
+  const scope = getExportScope();
+  const disponibles = getRowsDisponiblesPourExport(scope);
+
+  if (dom.exportRowsInfo) {
+    dom.exportRowsInfo.textContent = `Lignes disponibles: ${disponibles}`;
+  }
+
+  const rawLimit = Number(dom.exportRowCount?.value || "");
+  if (!Number.isFinite(rawLimit) || rawLimit <= 0) {
+    return;
+  }
+
+  const limit = Math.floor(rawLimit);
+  if (limit > disponibles && dom.exportRowCount) {
+    dom.exportRowCount.value = disponibles > 0 ? String(disponibles) : "";
+  }
+}
+
+async function exporterDepuisModal() {
   if (!store.hasData()) {
     afficherToast("Aucune donnee a exporter.", "warning");
     return;
   }
 
+  const scope = getExportScope();
+  const format = texte(dom.exportFormat?.value || "numbers_csv") || "numbers_csv";
+  const disponibles = getRowsDisponiblesPourExport(scope);
+
+  if (disponibles <= 0) {
+    afficherToast("Aucune ligne disponible pour cet export.", "warning");
+    return;
+  }
+
+  let rowLimit = null;
+  if (dom.exportRowCount) {
+    const parsed = Number(dom.exportRowCount.value || "");
+    if (Number.isFinite(parsed) && parsed > 0) {
+      rowLimit = Math.min(Math.floor(parsed), disponibles);
+    }
+  }
+
+  const nomParDefaut = scope === "filtered" ? "export_vue_filtree" : "export_table_complete";
+  const filename = texte(dom.exportFilename?.value || "") || nomParDefaut;
+
   const payload = store.buildExportPayload({
-    filteredOnly: filtreSeulement,
-    includeHidden: !filtreSeulement,
-    filename: filtreSeulement ? "export_vue_filtree" : "export_table_complete",
+    filteredOnly: scope === "filtered",
+    includeHidden: scope !== "filtered",
+    rowLimit,
+    filename,
+    format,
   });
 
   try {
@@ -736,7 +837,8 @@ async function exporter({ filtreSeulement }) {
     const filename = parseFilename(response.headers.get("Content-Disposition"), `${payload.filename}.csv`);
     telechargerBlob(blob, filename);
     fermerModalActive();
-    afficherToast("Export CSV termine.", "success");
+    const labelFormat = format === "numbers_csv" ? "Numbers" : "CSV";
+    afficherToast(`Export ${labelFormat} termine.`, "success");
   } catch (error) {
     afficherToast(error.message || "Echec export.", "danger");
   }
@@ -747,6 +849,20 @@ function ouvrirExport() {
     afficherToast("Aucune donnee a exporter.", "warning");
     return;
   }
+
+  if (dom.exportScope) {
+    dom.exportScope.value = "all";
+  }
+  if (dom.exportFormat) {
+    dom.exportFormat.value = "numbers_csv";
+  }
+  if (dom.exportRowCount) {
+    dom.exportRowCount.value = "";
+  }
+  if (dom.exportFilename) {
+    dom.exportFilename.value = "export_tableau";
+  }
+  actualiserInfosExport();
   ouvrirModal(dom.modalExport);
 }
 
@@ -1032,9 +1148,12 @@ function bindEvents() {
 
   dom.enregistrerColonne?.addEventListener("click", enregistrerEditionColonne);
   dom.supprimerColonne?.addEventListener("click", supprimerColonneSelectionnee);
+  dom.btnMonterColonne?.addEventListener("click", () => deplacerColonneSelectionnee(-1));
+  dom.btnDescendreColonne?.addEventListener("click", () => deplacerColonneSelectionnee(1));
 
-  dom.exporterTout?.addEventListener("click", () => exporter({ filtreSeulement: false }));
-  dom.exporterFiltres?.addEventListener("click", () => exporter({ filtreSeulement: true }));
+  dom.exportScope?.addEventListener("change", actualiserInfosExport);
+  dom.exportRowCount?.addEventListener("input", actualiserInfosExport);
+  dom.exporterMaintenant?.addEventListener("click", exporterDepuisModal);
 
   dom.genererLien?.addEventListener("click", genererLienPartage);
   dom.copierLien?.addEventListener("click", copierLienPartage);

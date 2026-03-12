@@ -191,6 +191,11 @@
           Colonne a gerer
           <select id="editSelectColonne"></select>
         </label>
+        <div class="actions-modale actions-colonnes">
+          <button id="btnMonterColonne" class="btn-secondaire" type="button">Monter</button>
+          <button id="btnDescendreColonne" class="btn-secondaire" type="button">Descendre</button>
+        </div>
+        <p id="infoPositionColonne" class="texte-discret"></p>
         <label>
           Nom
           <input id="editNomColonne" type="text" />
@@ -228,14 +233,41 @@
 
     <section id="modalExport" class="modal hidden" role="dialog" aria-modal="true" aria-label="Exporter">
       <header class="entete-modal">
-        <h3>Exporter en CSV</h3>
+        <h3>Exporter les donnees</h3>
         <button id="fermerExport" class="btn-icone" type="button" aria-label="Fermer">x</button>
       </header>
-      <div class="corps-modal">
-        <p class="texte-discret">Choisis ce que tu veux exporter:</p>
+      <div class="corps-modal formulaire-simple">
+        <p class="texte-discret">Choisis le format, la source et le nombre de lignes.</p>
+
+        <label>
+          Source des lignes
+          <select id="exportScope">
+            <option value="all">Tableau complet</option>
+            <option value="filtered">Vue filtree (recherche + filtres)</option>
+          </select>
+        </label>
+
+        <label>
+          Format
+          <select id="exportFormat">
+            <option value="numbers_csv">Numbers (CSV compatible)</option>
+            <option value="csv_standard">CSV standard</option>
+          </select>
+        </label>
+
+        <label>
+          Nombre de lignes a exporter
+          <input id="exportRowCount" type="number" min="1" step="1" placeholder="Laisser vide pour tout exporter" />
+        </label>
+        <p id="exportRowsInfo" class="texte-discret"></p>
+
+        <label>
+          Nom du fichier
+          <input id="exportFilename" type="text" placeholder="export_tableau" />
+        </label>
+
         <div class="actions-modale">
-          <button id="exporterTout" class="btn-primaire" type="button">Exporter tout le tableau</button>
-          <button id="exporterFiltres" class="btn-secondaire" type="button">Exporter seulement les lignes filtrees</button>
+          <button id="exporterMaintenant" class="btn-primaire" type="button">Exporter</button>
         </div>
       </div>
     </section>

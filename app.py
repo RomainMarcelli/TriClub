@@ -285,12 +285,18 @@ def suggest_mapping(headers: list[str]) -> dict[str, str]:
     return mapping
 
 
-def build_csv_bytes(headers: list[str], rows: list[list[str]]) -> bytes:
+def build_csv_bytes(
+    headers: list[str],
+    rows: list[list[str]],
+    delimiter: str = ";",
+    include_bom: bool = True,
+) -> bytes:
     output = io.StringIO(newline="")
-    writer = csv.writer(output, delimiter=";")
+    writer = csv.writer(output, delimiter=delimiter)
     writer.writerow(headers)
     writer.writerows(rows)
-    return output.getvalue().encode("utf-8-sig")
+    encoding = "utf-8-sig" if include_bom else "utf-8"
+    return output.getvalue().encode(encoding)
 
 
 def compress_payload(payload: dict[str, Any]) -> str:
@@ -860,6 +866,14 @@ def api_export():
     columns = sanitize_columns(data.get("columns", []))
     rows = sanitize_rows(data.get("rows", []))
     filename = clean_cell(data.get("filename", "export_numbers"))
+    export_format = clean_cell(data.get("format", "numbers_csv")).lower()
+
+    if export_format in {"numbers", "numbers_csv"}:
+        export_format = "numbers_csv"
+    elif export_format in {"csv", "csv_standard", "standard_csv"}:
+        export_format = "csv_standard"
+    else:
+        return jsonify({"error": "Format d'export non supporte."}), 400
 
     if not columns:
         return jsonify({"error": "Aucune colonne a exporter."}), 400
@@ -871,7 +885,9 @@ def api_export():
         values = row.get("values", {})
         csv_rows.append([clean_cell(values.get(col["id"], "")) for col in columns])
 
-    csv_bytes = build_csv_bytes(headers, csv_rows)
+    delimiter = ";" if export_format == "numbers_csv" else ","
+    include_bom = export_format == "numbers_csv"
+    csv_bytes = build_csv_bytes(headers, csv_rows, delimiter=delimiter, include_bom=include_bom)
     safe_filename = f"{slugify_filename(filename)}.csv"
 
     return send_file(
