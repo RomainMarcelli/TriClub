@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Ben - Espace de donnees</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+  </head>
+  <body>
+    <div class="fond-orbe orbe-a"></div>
+    <div class="fond-orbe orbe-b"></div>
+
+    <main class="app-simple">
+      <header class="carte entete">
+        <div class="marque">
+          <div class="point-marque"></div>
+          <div>
+            <p class="titre-marque">Ben Workspace</p>
+            <p class="sous-titre-marque">Extraction PDF -> tableau intelligent</p>
+          </div>
+        </div>
+
+        <div class="actions-entete">
+          <button id="btnImporterHaut" class="btn-primaire" type="button">Importer un PDF</button>
+          <button id="btnExporterHaut" class="btn-secondaire" type="button">Exporter</button>
+          <button id="btnPartagerHaut" class="btn-secondaire" type="button">Partager</button>
+        </div>
+      </header>
+
+      <section class="carte barre-outils">
+        <input id="champRecherche" class="champ-recherche" type="text" placeholder="Rechercher dans tout le tableau..." />
+        <button id="btnFiltres" class="btn-secondaire" type="button">Filtres</button>
+        <button id="btnAjouterColonne" class="btn-secondaire" type="button">Ajouter une colonne</button>
+        <button id="btnGererColonnes" class="btn-secondaire" type="button">Gerer les colonnes</button>
+      </section>
+
+      <section id="panneauFiltres" class="carte panneau-filtres hidden">
+        <div class="bloc-filtres-rapides">
+          <p class="titre-filtres-rapides">Filtres rapides</p>
+          <div id="filtresRapides" class="grille-filtres-rapides">
+            <button class="btn-filtre-rapide" type="button" data-quick-filter="tri_nom_az">Nom club A -> Z</button>
+            <button class="btn-filtre-rapide" type="button" data-quick-filter="tri_nom_za">Nom club Z -> A</button>
+            <button class="btn-filtre-rapide" type="button" data-quick-filter="tri_cd_asc">CD croissant</button>
+            <button class="btn-filtre-rapide" type="button" data-quick-filter="tri_cd_desc">CD decroissant</button>
+            <button class="btn-filtre-rapide" type="button" data-quick-filter="tri_selection_asc">Colonne selectionnee croissante</button>
+            <button class="btn-filtre-rapide" type="button" data-quick-filter="tri_selection_desc">Colonne selectionnee decroissante</button>
+            <button class="btn-filtre-rapide" type="button" data-quick-filter="filtre_clubs">Juste les clubs</button>
+            <button class="btn-filtre-rapide" type="button" data-quick-filter="filtre_regions">Par regions</button>
+            <button class="btn-filtre-rapide" type="button" data-quick-filter="filtre_departements">Par departements</button>
+            <button class="btn-filtre-rapide" type="button" data-quick-filter="filtre_villes">Juste les villes</button>
+            <button class="btn-filtre-rapide" type="button" data-quick-filter="donnees_completes">Donnees completes</button>
+            <button class="btn-filtre-rapide" type="button" data-quick-filter="reset_filtres">Reinitialiser filtres</button>
+          </div>
+        </div>
+
+        <div class="ligne-filtres">
+          <h2>Filtres actifs</h2>
+          <button id="btnAjouterFiltre" class="btn-secondaire petit" type="button">Ajouter un filtre</button>
+        </div>
+        <div id="listeFiltres" class="liste-filtres"></div>
+      </section>
+
+      <section id="etatVide" class="carte etat-vide">
+        <h1>Importe un PDF pour commencer</h1>
+        <p>Tu pourras ensuite rechercher, filtrer, ajouter des colonnes et exporter en CSV.</p>
+        <button id="btnImporterVide" class="btn-primaire" type="button">Importer un PDF</button>
+      </section>
+
+      <section id="sectionTableau" class="carte section-tableau hidden">
+        <div class="meta-tableau">
+          <p id="statsTableau">0 ligne</p>
+          <p id="etiquetteColonne" class="texte-discret">Double-clique une cellule pour l'editer</p>
+        </div>
+
+        <div id="tableScroll" class="table-scroll">
+          <table id="tableDonnees">
+            <thead id="tableHead"></thead>
+            <tbody id="tableBody"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <div id="toast" class="toast hidden"></div>
+    <div id="modalBackdrop" class="modal-backdrop hidden"></div>
+
+    <section id="modalImport" class="modal hidden" role="dialog" aria-modal="true" aria-label="Import PDF">
+      <header class="entete-modal">
+        <h3>Importer un PDF</h3>
+        <button id="fermerImport" class="btn-icone" type="button" aria-label="Fermer">x</button>
+      </header>
+
+      <div id="etapeUpload" class="corps-modal">
+        <label id="zoneDepot" class="zone-depot">
+          <input id="inputPdf" type="file" accept="application/pdf" hidden />
+          <p class="titre-depot">Glisse ton PDF ici ou clique pour choisir un fichier</p>
+          <p class="texte-discret">Taille max: 20 MB</p>
+        </label>
+
+        <div class="bloc-progression">
+          <div>
+            <p class="label-progression">Upload</p>
+            <div class="piste-progression"><div id="barreUpload" class="barre-progression"></div></div>
+          </div>
+          <div>
+            <p class="label-progression">Extraction</p>
+            <div class="piste-progression"><div id="barreExtraction" class="barre-progression"></div></div>
+          </div>
+          <p id="statutImport" class="texte-discret">En attente d'un fichier.</p>
+        </div>
+      </div>
+
+      <div id="etapePreview" class="corps-modal hidden">
+        <div class="meta-preview">
+          <p><strong id="apercuLignes">0</strong> lignes detectees</p>
+          <p id="apercuMeta" class="texte-discret"></p>
+        </div>
+
+        <div class="grille-mapping">
+          <label>
+            Nom club
+            <select id="mapNomClub"></select>
+          </label>
+          <label>
+            Ligue
+            <select id="mapLigue"></select>
+          </label>
+          <label>
+            CD
+            <select id="mapCD"></select>
+          </label>
+        </div>
+
+        <div class="table-preview-wrap">
+          <table id="tablePreview">
+            <thead></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <div class="actions-modale">
+          <button id="retourUpload" class="btn-secondaire" type="button">Retour</button>
+          <button id="confirmerImport" class="btn-primaire" type="button">Importer dans le tableau</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="modalAjoutColonne" class="modal hidden" role="dialog" aria-modal="true" aria-label="Ajouter colonne">
+      <header class="entete-modal">
+        <h3>Ajouter une colonne</h3>
+        <button id="fermerAjoutColonne" class="btn-icone" type="button" aria-label="Fermer">x</button>
+      </header>
+      <div class="corps-modal formulaire-simple">
+        <label>
+          Nom de la colonne
+          <input id="inputNomColonne" type="text" placeholder="Ex: Responsable" />
+        </label>
+        <label>
+          Type
+          <select id="inputTypeColonne">
+            <option value="text">Texte</option>
+            <option value="number">Nombre</option>
+            <option value="tag">Tag</option>
+            <option value="dropdown">Liste</option>
+            <option value="checkbox">Case a cocher</option>
+            <option value="date">Date</option>
+          </select>
+        </label>
+        <label>
+          Valeur par defaut
+          <input id="inputValeurParDefaut" type="text" />
+        </label>
+        <label>
+          Options de liste (separees par des virgules)
+          <textarea id="inputOptionsColonne" rows="3" placeholder="Option 1, Option 2"></textarea>
+        </label>
+
+        <div class="actions-modale">
+          <button id="creerColonne" class="btn-primaire" type="button">Ajouter la colonne</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="modalEditionColonne" class="modal hidden" role="dialog" aria-modal="true" aria-label="Modifier colonne">
+      <header class="entete-modal">
+        <h3>Modifier la colonne</h3>
+        <button id="fermerEditionColonne" class="btn-icone" type="button" aria-label="Fermer">x</button>
+      </header>
+      <div class="corps-modal formulaire-simple">
+        <label>
+          Colonne a gerer
+          <select id="editSelectColonne"></select>
+        </label>
+        <label>
+          Nom
+          <input id="editNomColonne" type="text" />
+        </label>
+        <label>
+          Type
+          <select id="editTypeColonne">
+            <option value="text">Texte</option>
+            <option value="number">Nombre</option>
+            <option value="tag">Tag</option>
+            <option value="dropdown">Liste</option>
+            <option value="checkbox">Case a cocher</option>
+            <option value="date">Date</option>
+          </select>
+        </label>
+        <label>
+          Valeur par defaut
+          <input id="editValeurParDefaut" type="text" />
+        </label>
+        <label>
+          Largeur (px)
+          <input id="editLargeurColonne" type="number" min="100" max="600" step="10" />
+        </label>
+        <label>
+          Options de liste (separees par des virgules)
+          <textarea id="editOptionsColonne" rows="3"></textarea>
+        </label>
+
+        <div class="actions-modale">
+          <button id="enregistrerColonne" class="btn-primaire" type="button">Enregistrer</button>
+          <button id="supprimerColonne" class="btn-danger" type="button">Supprimer</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="modalExport" class="modal hidden" role="dialog" aria-modal="true" aria-label="Exporter">
+      <header class="entete-modal">
+        <h3>Exporter en CSV</h3>
+        <button id="fermerExport" class="btn-icone" type="button" aria-label="Fermer">x</button>
+      </header>
+      <div class="corps-modal">
+        <p class="texte-discret">Choisis ce que tu veux exporter:</p>
+        <div class="actions-modale">
+          <button id="exporterTout" class="btn-primaire" type="button">Exporter tout le tableau</button>
+          <button id="exporterFiltres" class="btn-secondaire" type="button">Exporter seulement les lignes filtrees</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="modalPartage" class="modal hidden" role="dialog" aria-modal="true" aria-label="Partager">
+      <header class="entete-modal">
+        <h3>Partager en lecture seule</h3>
+        <button id="fermerPartage" class="btn-icone" type="button" aria-label="Fermer">x</button>
+      </header>
+      <div class="corps-modal formulaire-simple">
+        <p class="texte-discret">Genere un lien public pour la vue actuelle.</p>
+        <div class="actions-modale">
+          <button id="genererLien" class="btn-primaire" type="button">Generer le lien</button>
+        </div>
+        <label>
+          Lien partageable
+          <input id="champLienPartage" type="text" readonly />
+        </label>
+        <div class="actions-modale">
+          <button id="copierLien" class="btn-secondaire" type="button">Copier le lien</button>
+        </div>
+      </div>
+    </section>
+
+    <script type="module" src="{{ url_for('static', filename='js/app.js') }}"></script>
+  </body>
+</html>

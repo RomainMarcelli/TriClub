@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Vue partagee | Ben Workspace</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+  </head>
+  <body class="shared-page">
+    <div class="fond-orbe orbe-a"></div>
+    <div class="fond-orbe orbe-b"></div>
+
+    <main class="shared-shell carte">
+      <header class="shared-head">
+        <div>
+          <p class="titre-marque">Ben Workspace</p>
+          <h1 id="sharedTitle">Vue partagee</h1>
+        </div>
+        <p class="type-pill">Lecture seule</p>
+      </header>
+
+      <section class="shared-toolbar">
+        <input id="sharedSearchInput" class="champ-recherche" type="text" placeholder="Rechercher dans le tableau partage..." />
+        <p id="sharedStats" class="texte-discret"></p>
+      </section>
+
+      <div class="table-scroll" id="sharedTableScroll">
+        <table id="sharedTable">
+          <thead></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </main>
+
+    <script id="sharedWorkspaceData" type="application/json">{{ workspace_json | safe }}</script>
+    <script type="module" src="{{ url_for('static', filename='js/shared.js') }}"></script>
+  </body>
+</html>
