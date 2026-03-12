@@ -16,7 +16,7 @@ Application web en francais pour:
 - Parsing PDF: `pdfplumber`
 - Frontend: `HTML + CSS + JavaScript (modules ES)`
 - Table performante: rendu virtualise (VirtualGrid)
-- Persistance: `SQLite`
+- Persistance: `PostgreSQL (Supabase)` ou fallback `SQLite`
 
 ## 3. Architecture
 - `app.py`: API Flask + extraction PDF + export + partage + persistance BDD.
@@ -52,12 +52,25 @@ Application web en francais pour:
 - Sauvegarde automatique en BDD et rechargement automatique au demarrage.
 
 ## 5. Base de Donnees
-Fichier SQLite par defaut:
+Mode persistance:
+- `SUPABASE_DB_URL` defini -> stockage `PostgreSQL` (Supabase)
+- sinon -> stockage `SQLite`
+
+SQLite par defaut:
 - `data/ben_workspace.db`
 - configurable via variable d'environnement `BEN_DB_PATH`.
 - fallback automatique sur `/tmp/ben_workspace.db` si le chemin principal est indisponible.
 
-### Schema
+### Schema PostgreSQL (Supabase)
+```sql
+CREATE TABLE IF NOT EXISTS workspace_state (
+  id SMALLINT PRIMARY KEY CHECK (id = 1),
+  payload JSONB NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+```
+
+### Schema SQLite (fallback)
 ```sql
 CREATE TABLE IF NOT EXISTS workspace_state (
   id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -116,6 +129,10 @@ Principes appliques:
   - fallback automatique SQLite en environnement restreint,
   - gestion d'erreur non bloquante sur lecture workspace,
   - message explicite si la sauvegarde est impossible.
+- Migration backend:
+  - support natif `SUPABASE_DB_URL` (PostgreSQL) pour `/api/workspace`,
+  - creation automatique de la table `workspace_state` sur Supabase,
+  - fallback SQLite si `SUPABASE_DB_URL` n'est pas defini.
 
 ---
 

@@ -16,6 +16,11 @@ import pdfplumber
 from flask import Flask, jsonify, render_template, request, send_file, url_for
 from itsdangerous import BadSignature, URLSafeSerializer
 
+try:
+    import psycopg
+except ImportError:  # pragma: no cover - optional dependency in local dev
+    psycopg = None
+
 app = Flask(__name__)
 app.secret_key = os.environ.get("APP_SECRET_KEY", secrets.token_hex(16))
 app.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024  # 20 MB
@@ -25,6 +30,8 @@ TARGET_FIELDS = ["Nom club", "Ligue", "CD"]
 TARGET_FIELDS_NORMALIZED = ["nom club", "ligue", "cd"]
 MAX_SHARE_RAW_BYTES = 700_000
 ALLOWED_FILTER_OPERATORS = {"equals", "contains", "starts_with", "is_empty", "is_not_empty"}
+SUPABASE_DB_URL = os.environ.get("SUPABASE_DB_URL", "").strip()
+DB_BACKEND = "postgres" if SUPABASE_DB_URL else "sqlite"
 DB_PATH = os.environ.get("BEN_DB_PATH", os.path.join(os.path.dirname(__file__), "data", "ben_workspace.db"))
 DB_FALLBACK_PATH = os.path.join("/tmp", "ben_workspace.db")
 DB_ACTIVE_PATH = DB_PATH
@@ -438,7 +445,7 @@ def sanitize_workspace_state(workspace: dict[str, Any]) -> dict[str, Any] | None
     }
 
 
-def ensure_database() -> None:
+def ensure_sqlite_database() -> None:
     global DB_ACTIVE_PATH
     errors: list[str] = []
 
@@ -474,8 +481,55 @@ def ensure_database() -> None:
     raise RuntimeError(f"Impossible d'initialiser la base SQLite. Details: {' | '.join(errors)}")
 
 
-def load_workspace_state() -> dict[str, Any] | None:
-    ensure_database()
+def ensure_postgres_database() -> None:
+    if psycopg is None:
+        raise RuntimeError("Le package 'psycopg' est requis pour utiliser SUPABASE_DB_URL.")
+    if not SUPABASE_DB_URL:
+        raise RuntimeError("SUPABASE_DB_URL est vide.")
+
+    with DB_LOCK:
+        with psycopg.connect(SUPABASE_DB_URL, autocommit=True) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS workspace_state (
+                        id SMALLINT PRIMARY KEY CHECK (id = 1),
+                        payload JSONB NOT NULL,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+
+
+def ensure_database() -> None:
+    if DB_BACKEND == "postgres":
+        ensure_postgres_database()
+        return
+    ensure_sqlite_database()
+
+
+def decode_workspace_payload(raw_payload: Any) -> dict[str, Any] | None:
+    if isinstance(raw_payload, dict):
+        return raw_payload
+
+    if isinstance(raw_payload, (bytes, bytearray, memoryview)):
+        try:
+            raw_payload = bytes(raw_payload).decode("utf-8")
+        except Exception:
+            return None
+
+    if isinstance(raw_payload, str):
+        try:
+            parsed = json.loads(raw_payload)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
+    return None
+
+
+def load_workspace_state_sqlite() -> dict[str, Any] | None:
+    ensure_sqlite_database()
     with DB_LOCK:
         with sqlite3.connect(DB_ACTIVE_PATH) as conn:
             row = conn.execute("SELECT payload FROM workspace_state WHERE id = 1").fetchone()
@@ -483,16 +537,39 @@ def load_workspace_state() -> dict[str, Any] | None:
     if not row:
         return None
 
-    try:
-        data = json.loads(row[0])
-    except json.JSONDecodeError:
+    data = decode_workspace_payload(row[0])
+    if data is None:
         return None
 
     return sanitize_workspace_state(data)
 
 
-def save_workspace_state(workspace: dict[str, Any]) -> str:
-    ensure_database()
+def load_workspace_state_postgres() -> dict[str, Any] | None:
+    ensure_postgres_database()
+    with DB_LOCK:
+        with psycopg.connect(SUPABASE_DB_URL) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT payload FROM workspace_state WHERE id = 1")
+                row = cur.fetchone()
+
+    if not row:
+        return None
+
+    data = decode_workspace_payload(row[0])
+    if data is None:
+        return None
+
+    return sanitize_workspace_state(data)
+
+
+def load_workspace_state() -> dict[str, Any] | None:
+    if DB_BACKEND == "postgres":
+        return load_workspace_state_postgres()
+    return load_workspace_state_sqlite()
+
+
+def save_workspace_state_sqlite(workspace: dict[str, Any]) -> str:
+    ensure_sqlite_database()
     payload = json.dumps(workspace, ensure_ascii=False, separators=(",", ":"))
     updated_at = datetime.now(timezone.utc).isoformat()
 
@@ -511,6 +588,42 @@ def save_workspace_state(workspace: dict[str, Any]) -> str:
             conn.commit()
 
     return updated_at
+
+
+def save_workspace_state_postgres(workspace: dict[str, Any]) -> str:
+    ensure_postgres_database()
+    payload = json.dumps(workspace, ensure_ascii=False, separators=(",", ":"))
+
+    with DB_LOCK:
+        with psycopg.connect(SUPABASE_DB_URL) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO workspace_state (id, payload, updated_at)
+                    VALUES (1, %s::jsonb, NOW())
+                    ON CONFLICT (id) DO UPDATE SET
+                        payload = EXCLUDED.payload,
+                        updated_at = NOW()
+                    RETURNING updated_at
+                    """,
+                    (payload,),
+                )
+                row = cur.fetchone()
+            conn.commit()
+
+    if not row or not row[0]:
+        return datetime.now(timezone.utc).isoformat()
+
+    if isinstance(row[0], datetime):
+        return row[0].isoformat()
+
+    return clean_cell(row[0])
+
+
+def save_workspace_state(workspace: dict[str, Any]) -> str:
+    if DB_BACKEND == "postgres":
+        return save_workspace_state_postgres(workspace)
+    return save_workspace_state_sqlite(workspace)
 
 
 @app.get("/")
@@ -644,12 +757,25 @@ def api_workspace_get():
         workspace = load_workspace_state()
     except Exception as error:
         app.logger.exception("Workspace load failed: %s", error)
-        return jsonify({"workspace": None, "exists": False, "warning": "workspace_storage_unavailable"}), 200
+        return (
+            jsonify(
+                {
+                    "workspace": None,
+                    "exists": False,
+                    "warning": "workspace_storage_unavailable",
+                    "storage_backend": DB_BACKEND,
+                }
+            ),
+            200,
+        )
 
     if workspace is None:
-        return jsonify({"workspace": None, "exists": False})
+        return jsonify({"workspace": None, "exists": False, "storage_backend": DB_BACKEND})
 
-    return jsonify({"workspace": workspace, "exists": True, "db_path": DB_ACTIVE_PATH})
+    response = {"workspace": workspace, "exists": True, "storage_backend": DB_BACKEND}
+    if DB_BACKEND == "sqlite":
+        response["db_path"] = DB_ACTIVE_PATH
+    return jsonify(response)
 
 
 @app.post("/api/workspace")
@@ -674,5 +800,8 @@ def api_health():
 
 
 if __name__ == "__main__":
-    ensure_database()
+    try:
+        ensure_database()
+    except Exception as error:
+        app.logger.warning("Database initialization warning: %s", error)
     app.run(host="0.0.0.0", port=5000, debug=True)
