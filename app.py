@@ -26,6 +26,8 @@ TARGET_FIELDS_NORMALIZED = ["nom club", "ligue", "cd"]
 MAX_SHARE_RAW_BYTES = 700_000
 ALLOWED_FILTER_OPERATORS = {"equals", "contains", "starts_with", "is_empty", "is_not_empty"}
 DB_PATH = os.environ.get("BEN_DB_PATH", os.path.join(os.path.dirname(__file__), "data", "ben_workspace.db"))
+DB_FALLBACK_PATH = os.path.join("/tmp", "ben_workspace.db")
+DB_ACTIVE_PATH = DB_PATH
 DB_LOCK = threading.Lock()
 FFR_LINE_PATTERN = re.compile(r"^(?P<ligue>.+?)\s+(?P<cd>\S+)\s+(?P<code>\d{4}[A-Za-z])\s+(?P<club>.+)$")
 FFR_IGNORE_PREFIXES = (
@@ -437,28 +439,45 @@ def sanitize_workspace_state(workspace: dict[str, Any]) -> dict[str, Any] | None
 
 
 def ensure_database() -> None:
-    db_dir = os.path.dirname(DB_PATH)
-    if db_dir:
-        os.makedirs(db_dir, exist_ok=True)
+    global DB_ACTIVE_PATH
+    errors: list[str] = []
 
     with DB_LOCK:
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS workspace_state (
-                    id INTEGER PRIMARY KEY CHECK (id = 1),
-                    payload TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-                """
-            )
-            conn.commit()
+        candidates = []
+        for path in (DB_ACTIVE_PATH, DB_PATH, DB_FALLBACK_PATH):
+            if path and path not in candidates:
+                candidates.append(path)
+
+        for candidate in candidates:
+            try:
+                db_dir = os.path.dirname(candidate)
+                if db_dir:
+                    os.makedirs(db_dir, exist_ok=True)
+
+                with sqlite3.connect(candidate) as conn:
+                    conn.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS workspace_state (
+                            id INTEGER PRIMARY KEY CHECK (id = 1),
+                            payload TEXT NOT NULL,
+                            updated_at TEXT NOT NULL
+                        )
+                        """
+                    )
+                    conn.commit()
+
+                DB_ACTIVE_PATH = candidate
+                return
+            except (OSError, sqlite3.Error) as error:
+                errors.append(f"{candidate}: {error}")
+
+    raise RuntimeError(f"Impossible d'initialiser la base SQLite. Details: {' | '.join(errors)}")
 
 
 def load_workspace_state() -> dict[str, Any] | None:
     ensure_database()
     with DB_LOCK:
-        with sqlite3.connect(DB_PATH) as conn:
+        with sqlite3.connect(DB_ACTIVE_PATH) as conn:
             row = conn.execute("SELECT payload FROM workspace_state WHERE id = 1").fetchone()
 
     if not row:
@@ -478,7 +497,7 @@ def save_workspace_state(workspace: dict[str, Any]) -> str:
     updated_at = datetime.now(timezone.utc).isoformat()
 
     with DB_LOCK:
-        with sqlite3.connect(DB_PATH) as conn:
+        with sqlite3.connect(DB_ACTIVE_PATH) as conn:
             conn.execute(
                 """
                 INSERT INTO workspace_state (id, payload, updated_at)
@@ -621,11 +640,16 @@ def api_share():
 
 @app.get("/api/workspace")
 def api_workspace_get():
-    workspace = load_workspace_state()
+    try:
+        workspace = load_workspace_state()
+    except Exception as error:
+        app.logger.exception("Workspace load failed: %s", error)
+        return jsonify({"workspace": None, "exists": False, "warning": "workspace_storage_unavailable"}), 200
+
     if workspace is None:
         return jsonify({"workspace": None, "exists": False})
 
-    return jsonify({"workspace": workspace, "exists": True})
+    return jsonify({"workspace": workspace, "exists": True, "db_path": DB_ACTIVE_PATH})
 
 
 @app.post("/api/workspace")
@@ -635,7 +659,12 @@ def api_workspace_post():
     if workspace is None:
         return jsonify({"error": "Payload workspace invalide."}), 400
 
-    updated_at = save_workspace_state(workspace)
+    try:
+        updated_at = save_workspace_state(workspace)
+    except Exception as error:
+        app.logger.exception("Workspace save failed: %s", error)
+        return jsonify({"error": "Sauvegarde indisponible (BDD inaccessible)."}), 503
+
     return jsonify({"status": "saved", "updated_at": updated_at})
 
 

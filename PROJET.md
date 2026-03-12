@@ -55,6 +55,7 @@ Application web en francais pour:
 Fichier SQLite par defaut:
 - `data/ben_workspace.db`
 - configurable via variable d'environnement `BEN_DB_PATH`.
+- fallback automatique sur `/tmp/ben_workspace.db` si le chemin principal est indisponible.
 
 ### Schema
 ```sql
@@ -111,6 +112,10 @@ Principes appliques:
 - Ajout d'une sauvegarde de secours sur fermeture de page (`sendBeacon`).
 - Ajout edition cellule par cellule au double-clic dans le tableau.
 - Ajout de filtres rapides supplementaires (tri + vues metier clubs/regions/departements/villes).
+- Durcissement de `/api/workspace`:
+  - fallback automatique SQLite en environnement restreint,
+  - gestion d'erreur non bloquante sur lecture workspace,
+  - message explicite si la sauvegarde est impossible.
 
 ---
 
