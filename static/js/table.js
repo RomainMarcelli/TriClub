@@ -28,7 +28,7 @@ export class VirtualGrid {
       onResizeColumn: callbacks.onResizeColumn || (() => {}),
     };
 
-    this.rowHeight = 44;
+    this.rowHeight = 48;
     this.overscan = 8;
 
     this.columns = [];
@@ -122,12 +122,15 @@ export class VirtualGrid {
     for (let index = start; index < end; index += 1) {
       const row = this.rows[index];
       const selectedClass = row.id === this.selectedRowId ? "row-selected" : "";
+      const stripeClass = index % 2 === 0 ? "row-even" : "row-odd";
 
       const cells = this.visibleColumns
         .map((col, colIndex) => {
           const rawValue = row.values[col.id] ?? "";
           const value = asText(rawValue);
-          return `<td class="cell" data-col-id="${escapeHtml(col.id)}">${this.renderCellControl({
+          const dataValueAttr =
+            col.type === "dropdown" ? ` data-value="${escapeHtml(asText(rawValue))}"` : "";
+          return `<td class="cell" data-col-id="${escapeHtml(col.id)}"${dataValueAttr}>${this.renderCellControl({
             rowId: row.id,
             col,
             value,
@@ -137,7 +140,7 @@ export class VirtualGrid {
         })
         .join("");
 
-      bodyHtml += `<tr class="data-row ${selectedClass}" data-row-id="${escapeHtml(row.id)}" data-row-index="${index}">${cells}</tr>`;
+      bodyHtml += `<tr class="data-row ${stripeClass} ${selectedClass}" data-row-id="${escapeHtml(row.id)}" data-row-index="${index}">${cells}</tr>`;
     }
 
     bodyHtml += `<tr class="spacer-row"><td colspan="${colCount}" style="height:${bottomHeight}px"></td></tr>`;
@@ -156,7 +159,9 @@ export class VirtualGrid {
 
     if (col.type === "dropdown") {
       const options = Array.isArray(col.options) ? col.options : [];
-      const optionNodes = [`<option value=""></option>`]
+      const requireValue = Boolean(col.defaultValue);
+      const head = requireValue ? [] : [`<option value=""></option>`];
+      const optionNodes = head
         .concat(
           options.map((option) => {
             const selected = option === value ? "selected" : "";
@@ -165,7 +170,7 @@ export class VirtualGrid {
         )
         .join("");
 
-      return `<select ${attrs} data-locked="true">${optionNodes}</select>`;
+      return `<select ${attrs}>${optionNodes}</select>`;
     }
 
     if (col.type === "date") {
@@ -440,7 +445,8 @@ export class VirtualGrid {
       return;
     }
 
-    if (input.type !== "checkbox") {
+    // Commit immédiat pour checkbox et select (single-click natif).
+    if (input.type !== "checkbox" && input.tagName !== "SELECT") {
       return;
     }
 

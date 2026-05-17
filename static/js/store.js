@@ -1,4 +1,7 @@
+import { DEFAULT_PROSPECTION_COLUMNS, LEGACY_COLUMN_MAP, normalizeColumnKey } from "./schema.js";
+
 const COLUMN_TYPES = ["text", "number", "tag", "dropdown", "checkbox", "date"];
+const DEFAULTED_DROPDOWN_IDS = ["col_role", "col_statut"];
 const ALLOWED_FILTER_OPERATORS = new Set(["equals", "contains", "starts_with", "is_empty", "is_not_empty"]);
 
 function uid(prefix = "id") {
@@ -423,6 +426,185 @@ export class WorkspaceStore {
 
     this.state.columns = columns;
     this.bumpData("reorderColumns");
+  }
+
+  addRow() {
+    if (!this.state.columns.length) {
+      return null;
+    }
+
+    const row = { id: uid("row"), values: {} };
+    this.state.columns.forEach((col) => {
+      if (col.type === "checkbox") {
+        row.values[col.id] = "false";
+      } else {
+        row.values[col.id] = asString(col.defaultValue || "");
+      }
+    });
+
+    this.state.rows.unshift(row);
+    this.state.selectedRowId = row.id;
+    this.bumpData("addRow");
+    return row;
+  }
+
+  deleteRow(rowId) {
+    const next = this.state.rows.filter((row) => row.id !== rowId);
+    if (next.length === this.state.rows.length) {
+      return;
+    }
+    this.state.rows = next;
+    if (this.state.selectedRowId === rowId) {
+      this.state.selectedRowId = null;
+    }
+    this.bumpData("deleteRow");
+  }
+
+  ensureProspectionSchema() {
+    let changed = false;
+
+    // 1) Rename anciennes colonnes vers les IDs cibles (préserve les valeurs).
+    this.state.columns.forEach((col) => {
+      let targetId = null;
+      if (LEGACY_COLUMN_MAP.ids[col.id]) {
+        targetId = LEGACY_COLUMN_MAP.ids[col.id];
+      } else {
+        const key = normalizeColumnKey(col.name);
+        if (key && LEGACY_COLUMN_MAP.names[key]) {
+          targetId = LEGACY_COLUMN_MAP.names[key];
+        }
+      }
+
+      if (!targetId || targetId === col.id) {
+        return;
+      }
+      // Si la colonne cible existe déjà ailleurs, on ne renomme pas
+      // (priorité aux valeurs déjà saisies dans la colonne cible).
+      if (this.state.columns.some((other) => other !== col && other.id === targetId)) {
+        return;
+      }
+
+      const oldId = col.id;
+      col.id = targetId;
+      this.state.rows.forEach((row) => {
+        if (row.values && Object.prototype.hasOwnProperty.call(row.values, oldId)) {
+          if (!row.values[targetId]) {
+            row.values[targetId] = row.values[oldId];
+          }
+          delete row.values[oldId];
+        }
+      });
+      changed = true;
+    });
+
+    // 2) Ajouter les colonnes du schéma manquantes.
+    DEFAULT_PROSPECTION_COLUMNS.forEach((defCol) => {
+      if (this.state.columns.some((c) => c.id === defCol.id)) {
+        return;
+      }
+      this.state.columns.push({
+        id: defCol.id,
+        name: defCol.name,
+        type: defCol.type,
+        width: defCol.width,
+        hidden: false,
+        defaultValue: defCol.defaultValue || "",
+        options: Array.isArray(defCol.options) ? defCol.options.slice() : [],
+      });
+      this.state.rows.forEach((row) => {
+        if (!row.values[defCol.id]) {
+          row.values[defCol.id] = defCol.defaultValue || "";
+        }
+      });
+      changed = true;
+    });
+
+    // 3) Pour les colonnes du schéma déjà présentes : aligner nom/type/options/default.
+    DEFAULT_PROSPECTION_COLUMNS.forEach((defCol) => {
+      const col = this.state.columns.find((c) => c.id === defCol.id);
+      if (!col) {
+        return;
+      }
+      if (col.name !== defCol.name) {
+        col.name = defCol.name;
+        changed = true;
+      }
+      if (col.type !== defCol.type) {
+        col.type = defCol.type;
+        changed = true;
+      }
+      if (defCol.width && col.width !== defCol.width) {
+        col.width = defCol.width;
+        changed = true;
+      }
+      if (Array.isArray(defCol.options) && defCol.options.length) {
+        const existing = Array.isArray(col.options) ? col.options : [];
+        const merged = defCol.options.slice();
+        existing.forEach((opt) => {
+          const safe = asString(opt);
+          if (safe && !merged.includes(safe)) {
+            merged.push(safe);
+          }
+        });
+        if (merged.length !== existing.length || merged.some((opt, idx) => opt !== existing[idx])) {
+          col.options = merged;
+          changed = true;
+        }
+      }
+      if (defCol.defaultValue && col.defaultValue !== defCol.defaultValue) {
+        col.defaultValue = defCol.defaultValue;
+        changed = true;
+      }
+    });
+
+    // 4) Pour Rôle / Statut, remplir les cellules vides avec la valeur par défaut.
+    DEFAULTED_DROPDOWN_IDS.forEach((id) => {
+      const col = this.state.columns.find((c) => c.id === id);
+      if (!col || !col.defaultValue) {
+        return;
+      }
+      this.state.rows.forEach((row) => {
+        if (!row.values[id] || !col.options.includes(row.values[id])) {
+          row.values[id] = col.defaultValue;
+          changed = true;
+        }
+      });
+    });
+
+    // 5) Réordonner : colonnes cibles dans l'ordre du schéma en tête, custom à la suite.
+    const targetIds = DEFAULT_PROSPECTION_COLUMNS.map((c) => c.id);
+    const targetCols = [];
+    const extraCols = [];
+    this.state.columns.forEach((c) => {
+      if (targetIds.includes(c.id)) {
+        return;
+      }
+      extraCols.push(c);
+    });
+    targetIds.forEach((id) => {
+      const c = this.state.columns.find((x) => x.id === id);
+      if (c) {
+        targetCols.push(c);
+      }
+    });
+    const reordered = targetCols.concat(extraCols);
+    const sameOrder =
+      reordered.length === this.state.columns.length &&
+      reordered.every((c, idx) => c.id === this.state.columns[idx].id);
+    if (!sameOrder) {
+      this.state.columns = reordered;
+      changed = true;
+    }
+
+    // 6) Selection par défaut.
+    if (!this.state.selectedColumnId || !this.state.columns.some((c) => c.id === this.state.selectedColumnId)) {
+      this.state.selectedColumnId = this.state.columns[0]?.id || null;
+    }
+
+    if (changed) {
+      this.bumpData("ensureProspectionSchema");
+    }
+    return changed;
   }
 
   updateCell(rowId, columnId, value) {

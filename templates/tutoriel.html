@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Tutoriel — Ben Workspace</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+  </head>
+  <body>
+    <div class="fond-orbe orbe-a"></div>
+    <div class="fond-orbe orbe-b"></div>
+
+    <main class="app-simple page-tutoriel">
+      <header class="carte entete">
+        <div class="marque">
+          <div class="point-marque"></div>
+          <div>
+            <p class="titre-marque">Tutoriel Ben Workspace</p>
+            <p class="sous-titre-marque">Guide complet de l'outil de prospection</p>
+          </div>
+        </div>
+        <div class="actions-entete">
+          <a href="{{ url_for('index') }}" class="btn-retour-tableau">
+            <span class="btn-retour-fleche">&larr;</span>
+            <span>Retour au tableau</span>
+          </a>
+        </div>
+      </header>
+
+      <section class="carte bloc-tuto">
+        <h1>Bienvenue sur Ben Workspace</h1>
+        <p>
+          Cet outil te permet de gérer la <strong>prospection des clubs</strong> dans un tableau intelligent.
+          Tes données sont sauvegardées automatiquement dans le cloud (Supabase) après chaque modification.
+        </p>
+      </section>
+
+      <section class="carte bloc-tuto">
+        <h2>1. Les 12 colonnes du tableau</h2>
+        <p>Le tableau contient 12 colonnes de base, dans cet ordre :</p>
+        <ul class="liste-tuto">
+          <li><strong>Nom du club</strong> &mdash; nom complet du club.</li>
+          <li><strong>Région</strong> &mdash; région administrative (Auvergne-Rhône-Alpes, etc.).</li>
+          <li><strong>Département</strong> &mdash; numéro ou nom du département.</li>
+          <li><strong>Site du club</strong> &mdash; URL du site officiel.</li>
+          <li><strong>Nom</strong> &mdash; nom du contact dans le club.</li>
+          <li><strong>Rôle</strong> &mdash; rôle du contact (menu déroulant : président, coach, etc.).</li>
+          <li><strong>Téléphone</strong> &mdash; numéro de téléphone.</li>
+          <li><strong>Mail</strong> &mdash; adresse e-mail.</li>
+          <li><strong>Statut de la prospection</strong> &mdash; menu déroulant coloré (à contacter, en cours, signé...).</li>
+          <li><strong>Date premier contact</strong> &mdash; date du premier échange.</li>
+          <li><strong>Date dernière action</strong> &mdash; date de la dernière interaction.</li>
+          <li><strong>Commentaires</strong> &mdash; notes libres.</li>
+        </ul>
+        <p class="texte-discret">
+          Tu peux ajouter d'autres colonnes personnalisées via le bouton « Ajouter une colonne ».
+        </p>
+      </section>
+
+      <section class="carte bloc-tuto">
+        <h2>2. Modifier les cellules</h2>
+        <ul class="liste-tuto">
+          <li>
+            <strong>Cellules texte / date / nombre</strong> &mdash; double-clique pour passer en mode édition,
+            tape ta valeur, puis <code>Entrée</code> pour valider ou <code>Échap</code> pour annuler.
+          </li>
+          <li>
+            <strong>Menus déroulants (Rôle, Statut)</strong> &mdash; un seul clic suffit, choisis dans la liste,
+            c'est sauvegardé instantanément.
+          </li>
+          <li>
+            <strong>Navigation clavier</strong> &mdash; en mode édition, utilise les flèches pour passer
+            de cellule en cellule, <code>Entrée</code> pour descendre d'une ligne.
+          </li>
+        </ul>
+      </section>
+
+      <section class="carte bloc-tuto">
+        <h2>3. Codes couleur du statut</h2>
+        <ul class="liste-tuto liste-couleurs">
+          <li><span class="pastille pastille-orange"></span> <strong>à contacter</strong> &mdash; aucun contact établi.</li>
+          <li><span class="pastille pastille-bleu"></span> <strong>en cours</strong> &mdash; échange en cours.</li>
+          <li><span class="pastille pastille-violet"></span> <strong>rdv fixé</strong> &mdash; rendez-vous programmé.</li>
+          <li><span class="pastille pastille-bleuclair"></span> <strong>proposition envoyée</strong> &mdash; offre transmise.</li>
+          <li><span class="pastille pastille-vert"></span> <strong>signé</strong> &mdash; contrat signé.</li>
+          <li><span class="pastille pastille-rouge"></span> <strong>pas signé</strong> &mdash; proposition refusée.</li>
+          <li><span class="pastille pastille-orangefonce"></span> <strong>à relancer</strong> &mdash; à relancer après silence.</li>
+        </ul>
+      </section>
+
+      <section class="carte bloc-tuto">
+        <h2>4. Ajouter / supprimer une ligne</h2>
+        <ul class="liste-tuto">
+          <li>
+            Clic sur <strong>« + Ajouter une ligne »</strong> dans la barre d'outils.
+            La ligne apparaît <strong>en tête de tableau</strong> avec :
+            <em>Rôle = aucune des catégories</em> et <em>Statut = à contacter</em> par défaut.
+          </li>
+          <li>
+            Pour supprimer : clic sur une ligne pour la sélectionner (une barre bleue apparaît à gauche),
+            puis le bouton <strong>« Supprimer la ligne »</strong> au-dessus du tableau s'active.
+          </li>
+        </ul>
+      </section>
+
+      <section class="carte bloc-tuto">
+        <h2>5. Filtrer et trier</h2>
+        <p>Clique sur <strong>« Filtres »</strong> pour ouvrir le panneau. Tu peux :</p>
+        <ul class="liste-tuto">
+          <li>
+            <strong>Filtres rapides</strong> &mdash; tris alphabétiques (Nom A→Z / Z→A),
+            tri par date dernière action, et 4 menus déroulants pour filtrer par
+            Région, Département, Rôle ou Statut.
+          </li>
+          <li>
+            <strong>Filtres avancés</strong> &mdash; clic sur « Ajouter un filtre » pour combiner plusieurs
+            critères avec les opérateurs : égal à, contient, commence par, est vide, n'est pas vide.
+          </li>
+          <li>
+            <strong>Recherche globale</strong> &mdash; le champ de recherche en haut filtre sur toutes les colonnes.
+          </li>
+          <li>
+            <strong>Tri par colonne</strong> &mdash; clic sur l'en-tête d'une colonne pour trier
+            (1er clic = croissant, 2e = décroissant, 3e = neutre).
+          </li>
+          <li>
+            <strong>Réinitialiser</strong> &mdash; bouton qui efface filtres, tri et recherche d'un coup.
+          </li>
+        </ul>
+      </section>
+
+      <section class="carte bloc-tuto">
+        <h2>6. Gérer les colonnes</h2>
+        <ul class="liste-tuto">
+          <li>
+            <strong>Ajouter</strong> &mdash; bouton « Ajouter une colonne », choisis le type
+            (texte, nombre, date, liste, case à cocher, tag) et la valeur par défaut.
+          </li>
+          <li>
+            <strong>Modifier / supprimer / réorganiser</strong> &mdash; bouton « Gérer les colonnes ».
+          </li>
+          <li>
+            <strong>Drag &amp; drop</strong> dans les en-têtes pour réordonner directement.
+          </li>
+          <li>
+            <strong>Redimensionner</strong> &mdash; glisse la poignée droite d'une en-tête.
+          </li>
+        </ul>
+      </section>
+
+      <section class="carte bloc-tuto">
+        <h2>7. Importer un PDF</h2>
+        <p>
+          L'app peut extraire un PDF type FFR (liste de clubs) et mapper les données dans
+          <em>Nom du club / Région / Département</em>. Les 9 autres colonnes seront créées vides
+          avec leurs valeurs par défaut.
+        </p>
+        <p class="texte-discret">
+          ⚠️ L'import écrase les données existantes du tableau (une confirmation t'est demandée).
+        </p>
+      </section>
+
+      <section class="carte bloc-tuto">
+        <h2>8. Exporter en CSV</h2>
+        <ul class="liste-tuto">
+          <li><strong>Numbers (CSV compatible)</strong> &mdash; séparateur <code>;</code> + BOM, ouvre direct dans Numbers/Excel français.</li>
+          <li><strong>CSV standard</strong> &mdash; séparateur <code>,</code>.</li>
+          <li>Choix de la source : tableau complet ou vue filtrée actuelle.</li>
+          <li>Limite optionnelle du nombre de lignes.</li>
+        </ul>
+      </section>
+
+      <section class="carte bloc-tuto">
+        <h2>9. Partager en lecture seule</h2>
+        <p>
+          Le bouton <strong>Partager</strong> génère un lien public qui montre la vue actuelle.
+          Personne ne peut modifier les données via ce lien. Idéal pour transmettre un extrait à un collègue.
+        </p>
+      </section>
+
+      <section class="carte bloc-tuto">
+        <h2>10. Sauvegarde automatique</h2>
+        <p>
+          Toute modification (cellule, ajout/suppression de ligne ou colonne, filtre…) est
+          <strong>sauvegardée automatiquement</strong> dans Supabase en quelques secondes.
+          Aucun bouton « Sauvegarder » à cliquer.
+        </p>
+        <p class="texte-discret">
+          Si tu vois un toast orange « Sauvegarde automatique indisponible », vérifie la connexion réseau
+          ou la configuration Supabase (variables d'environnement).
+        </p>
+      </section>
+
+      <section class="carte bloc-tuto">
+        <h2>Astuces</h2>
+        <ul class="liste-tuto">
+          <li>La 1<sup>re</sup> colonne (<em>Nom du club</em>) reste figée pendant le scroll horizontal.</li>
+          <li>Le clic sur une ligne la sélectionne (utile avant « Supprimer la ligne »).</li>
+          <li>Les lignes sont alternées blanc/bleu pour la lisibilité.</li>
+          <li>Au survol d'une ligne, elle se surligne en bleu.</li>
+        </ul>
+      </section>
+
+      <section class="carte bloc-tuto bloc-tuto-fin">
+        <p>Tu as fait le tour ! Lance-toi dans la prospection.</p>
+        <a href="{{ url_for('index') }}" class="btn-retour-tableau btn-retour-tableau-large">
+          <span class="btn-retour-fleche">&larr;</span>
+          <span>Revenir au tableau</span>
+        </a>
+      </section>
+    </main>
+  </body>
+</html>

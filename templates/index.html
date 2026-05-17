@@ -21,6 +21,10 @@
         </div>
 
         <div class="actions-entete">
+          <a href="{{ url_for('tutoriel_view') }}" class="btn-tuto" target="_blank" rel="noopener" title="Ouvrir le guide d'utilisation">
+            <span class="btn-tuto-icone">?</span>
+            <span class="btn-tuto-label">Tutoriel</span>
+          </a>
           <button id="btnImporterHaut" class="btn-primaire" type="button">Importer un PDF</button>
           <button id="btnExporterHaut" class="btn-secondaire" type="button">Exporter</button>
           <button id="btnPartagerHaut" class="btn-secondaire" type="button">Partager</button>
@@ -30,6 +34,7 @@
       <section class="carte barre-outils">
         <input id="champRecherche" class="champ-recherche" type="text" placeholder="Rechercher dans tout le tableau..." />
         <button id="btnFiltres" class="btn-secondaire" type="button">Filtres</button>
+        <button id="btnAjouterLigne" class="btn-primaire" type="button">+ Ajouter une ligne</button>
         <button id="btnAjouterColonne" class="btn-secondaire" type="button">Ajouter une colonne</button>
         <button id="btnGererColonnes" class="btn-secondaire" type="button">Gerer les colonnes</button>
       </section>
@@ -38,18 +43,15 @@
         <div class="bloc-filtres-rapides">
           <p class="titre-filtres-rapides">Filtres rapides</p>
           <div id="filtresRapides" class="grille-filtres-rapides">
-            <button class="btn-filtre-rapide" type="button" data-quick-filter="tri_nom_az">Nom club A -> Z</button>
-            <button class="btn-filtre-rapide" type="button" data-quick-filter="tri_nom_za">Nom club Z -> A</button>
-            <button class="btn-filtre-rapide" type="button" data-quick-filter="tri_cd_asc">CD croissant</button>
-            <button class="btn-filtre-rapide" type="button" data-quick-filter="tri_cd_desc">CD decroissant</button>
-            <button class="btn-filtre-rapide" type="button" data-quick-filter="tri_selection_asc">Colonne selectionnee croissante</button>
-            <button class="btn-filtre-rapide" type="button" data-quick-filter="tri_selection_desc">Colonne selectionnee decroissante</button>
-            <button class="btn-filtre-rapide" type="button" data-quick-filter="filtre_clubs">Juste les clubs</button>
-            <button class="btn-filtre-rapide" type="button" data-quick-filter="filtre_regions">Par regions</button>
-            <button class="btn-filtre-rapide" type="button" data-quick-filter="filtre_departements">Par departements</button>
-            <button class="btn-filtre-rapide" type="button" data-quick-filter="filtre_villes">Juste les villes</button>
-            <button class="btn-filtre-rapide" type="button" data-quick-filter="donnees_completes">Donnees completes</button>
-            <button class="btn-filtre-rapide" type="button" data-quick-filter="reset_filtres">Reinitialiser filtres</button>
+            <button class="btn-filtre-rapide" type="button" data-quick-filter="tri_nom_az">Nom A → Z</button>
+            <button class="btn-filtre-rapide" type="button" data-quick-filter="tri_nom_za">Nom Z → A</button>
+            <button class="btn-filtre-rapide" type="button" data-quick-filter="tri_date_asc">Date dernière action ↑</button>
+            <button class="btn-filtre-rapide" type="button" data-quick-filter="tri_date_desc">Date dernière action ↓</button>
+            <select class="btn-filtre-rapide select-filtre" data-quick-picker="region"></select>
+            <select class="btn-filtre-rapide select-filtre" data-quick-picker="departement"></select>
+            <select class="btn-filtre-rapide select-filtre" data-quick-picker="role"></select>
+            <select class="btn-filtre-rapide select-filtre" data-quick-picker="statut"></select>
+            <button class="btn-filtre-rapide" type="button" data-quick-filter="reset_filtres">Réinitialiser</button>
           </div>
         </div>
 
@@ -70,6 +72,7 @@
         <div class="meta-tableau">
           <p id="statsTableau">0 ligne</p>
           <p id="etiquetteColonne" class="texte-discret">Double-clique une cellule pour l'editer</p>
+          <button id="btnSupprimerLigne" class="btn-danger petit" type="button" disabled>Supprimer la ligne</button>
         </div>
 
         <div id="tableScroll" class="table-scroll">
@@ -118,15 +121,15 @@
 
         <div class="grille-mapping">
           <label>
-            Nom club
+            Nom du club
             <select id="mapNomClub"></select>
           </label>
           <label>
-            Ligue
+            Région
             <select id="mapLigue"></select>
           </label>
           <label>
-            CD
+            Département
             <select id="mapCD"></select>
           </label>
         </div>
@@ -268,6 +271,23 @@
 
         <div class="actions-modale">
           <button id="exporterMaintenant" class="btn-primaire" type="button">Exporter</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="modalConfirmSuppression" class="modal modal-confirm hidden" role="dialog" aria-modal="true" aria-label="Confirmer la suppression">
+      <header class="entete-modal">
+        <h3>Supprimer cette ligne ?</h3>
+        <button id="fermerConfirmSuppression" class="btn-icone" type="button" aria-label="Fermer">x</button>
+      </header>
+      <div class="corps-modal">
+        <div class="icone-confirm-danger">!</div>
+        <p class="texte-confirm-principal">Cette action est <strong>définitive</strong>.</p>
+        <p class="texte-confirm-secondaire">La ligne sera supprimée du tableau et de la sauvegarde Supabase.</p>
+        <p id="apercuLigneSuppression" class="apercu-ligne-suppression"></p>
+        <div class="actions-modale actions-confirm">
+          <button id="annulerSuppression" class="btn-secondaire" type="button">Annuler</button>
+          <button id="confirmerSuppression" class="btn-danger btn-confirm-danger" type="button">Oui, supprimer</button>
         </div>
       </div>
     </section>

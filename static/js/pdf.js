@@ -1,3 +1,5 @@
+import { DEFAULT_PROSPECTION_COLUMNS } from "./schema.js";
+
 function parseJsonResponse(text) {
   try {
     return JSON.parse(text || "{}");
@@ -75,11 +77,15 @@ export function uploadPdfWithProgress(file, handlers = {}) {
 }
 
 export function buildWorkspaceFromImport({ rows, mapping }) {
-  const columns = [
-    { id: "col_nom_club", name: "Nom club", type: "text", width: 220, hidden: false, defaultValue: "", options: [] },
-    { id: "col_ligue", name: "Ligue", type: "text", width: 190, hidden: false, defaultValue: "", options: [] },
-    { id: "col_cd", name: "CD", type: "text", width: 130, hidden: false, defaultValue: "", options: [] },
-  ];
+  const columns = DEFAULT_PROSPECTION_COLUMNS.map((col) => ({
+    id: col.id,
+    name: col.name,
+    type: col.type,
+    width: col.width,
+    hidden: false,
+    defaultValue: col.defaultValue || "",
+    options: Array.isArray(col.options) ? col.options.slice() : [],
+  }));
 
   const sourceNomClub = cleanText(mapping["Nom club"]);
   const sourceLigue = cleanText(mapping["Ligue"]);
@@ -89,16 +95,22 @@ export function buildWorkspaceFromImport({ rows, mapping }) {
   const mappedRows = [];
 
   safeRows.forEach((sourceRow) => {
-    const rowValues = {
-      col_nom_club: cleanText(sourceNomClub ? sourceRow[sourceNomClub] : ""),
-      col_ligue: cleanText(sourceLigue ? sourceRow[sourceLigue] : ""),
-      col_cd: cleanText(sourceCD ? sourceRow[sourceCD] : ""),
-    };
+    const valueNomClub = cleanText(sourceNomClub ? sourceRow[sourceNomClub] : "");
+    const valueRegion = cleanText(sourceLigue ? sourceRow[sourceLigue] : "");
+    const valueDepartement = cleanText(sourceCD ? sourceRow[sourceCD] : "");
 
-    const hasData = Object.values(rowValues).some((value) => value.length > 0);
+    const hasData = Boolean(valueNomClub || valueRegion || valueDepartement);
     if (!hasData) {
       return;
     }
+
+    const rowValues = {};
+    columns.forEach((col) => {
+      rowValues[col.id] = col.defaultValue || "";
+    });
+    rowValues.col_nom_club = valueNomClub;
+    rowValues.col_region = valueRegion;
+    rowValues.col_departement = valueDepartement;
 
     mappedRows.push({
       id: uid("row"),

@@ -1,6 +1,7 @@
 import { FILTER_OPERATORS, WorkspaceStore } from "./store.js";
 import { buildWorkspaceFromImport, uploadPdfWithProgress } from "./pdf.js";
 import { VirtualGrid } from "./table.js";
+import { ROLE_OPTIONS, STATUT_OPTIONS } from "./schema.js";
 
 const dom = {
   etatVide: document.getElementById("etatVide"),
@@ -23,6 +24,8 @@ const dom = {
   btnExporterHaut: document.getElementById("btnExporterHaut"),
   btnPartagerHaut: document.getElementById("btnPartagerHaut"),
   btnImporterVide: document.getElementById("btnImporterVide"),
+  btnAjouterLigne: document.getElementById("btnAjouterLigne"),
+  btnSupprimerLigne: document.getElementById("btnSupprimerLigne"),
   btnAjouterColonne: document.getElementById("btnAjouterColonne"),
   btnGererColonnes: document.getElementById("btnGererColonnes"),
 
@@ -83,6 +86,12 @@ const dom = {
   champLienPartage: document.getElementById("champLienPartage"),
   copierLien: document.getElementById("copierLien"),
 
+  modalConfirmSuppression: document.getElementById("modalConfirmSuppression"),
+  fermerConfirmSuppression: document.getElementById("fermerConfirmSuppression"),
+  annulerSuppression: document.getElementById("annulerSuppression"),
+  confirmerSuppression: document.getElementById("confirmerSuppression"),
+  apercuLigneSuppression: document.getElementById("apercuLigneSuppression"),
+
   toast: document.getElementById("toast"),
 };
 
@@ -128,6 +137,7 @@ const grille = new VirtualGrid({
 let modalActive = null;
 let timerToast = null;
 let payloadImport = null;
+let ligneEnAttenteSuppression = null;
 
 function texte(value) {
   if (value === null || value === undefined) {
@@ -197,138 +207,41 @@ function creerFiltreRapide(columnId, operator = "is_not_empty", value = "") {
   };
 }
 
+const PICKER_TO_COLUMN = {
+  region: "col_region",
+  departement: "col_departement",
+  role: "col_role",
+  statut: "col_statut",
+};
+
+const PICKER_LABELS = {
+  region: "Filtrer par Région...",
+  departement: "Filtrer par Département...",
+  role: "Filtrer par Rôle...",
+  statut: "Filtrer par Statut...",
+};
+
 function appliquerFiltreRapide(code) {
-  const colonneClub = trouverColonneParNoms(["nom club", "club"]);
-  const colonneLigue = trouverColonneParNoms(["ligue", "region", "région"]);
-  const colonneCD = trouverColonneParNoms(["cd", "departement", "département"]);
-  const colonneVille = trouverColonneParNoms(["ville", "commune", "city"]);
-  const colonneSelectionnee = store.getSelectedColumn()?.id || null;
-
-  if (code === "tri_selection_asc") {
-    if (!colonneSelectionnee) {
-      afficherToast("Selectionne d'abord une colonne.", "warning");
-      return;
-    }
-    store.setSort(colonneSelectionnee, "asc");
-    afficherToast("Tri croissant applique.", "success");
-    return;
-  }
-
-  if (code === "tri_selection_desc") {
-    if (!colonneSelectionnee) {
-      afficherToast("Selectionne d'abord une colonne.", "warning");
-      return;
-    }
-    store.setSort(colonneSelectionnee, "desc");
-    afficherToast("Tri decroissant applique.", "success");
-    return;
-  }
-
   if (code === "tri_nom_az") {
-    if (!colonneClub) {
-      afficherToast('Colonne "Nom club" introuvable.', "warning");
-      return;
-    }
-    store.setSort(colonneClub, "asc");
-    afficherToast("Tri alphabetique A -> Z applique sur Nom club.", "success");
+    store.setSort("col_nom_club", "asc");
+    afficherToast("Tri A → Z sur Nom du club.", "success");
     return;
   }
-
   if (code === "tri_nom_za") {
-    if (!colonneClub) {
-      afficherToast('Colonne "Nom club" introuvable.', "warning");
-      return;
-    }
-    store.setSort(colonneClub, "desc");
-    afficherToast("Tri alphabetique Z -> A applique sur Nom club.", "success");
+    store.setSort("col_nom_club", "desc");
+    afficherToast("Tri Z → A sur Nom du club.", "success");
     return;
   }
-
-  if (code === "tri_cd_asc") {
-    if (!colonneCD) {
-      afficherToast('Colonne "CD" introuvable.', "warning");
-      return;
-    }
-    store.setSort(colonneCD, "asc");
-    afficherToast("Tri croissant applique sur CD.", "success");
+  if (code === "tri_date_asc") {
+    store.setSort("col_date_derniere_action", "asc");
+    afficherToast("Tri date dernière action croissant.", "success");
     return;
   }
-
-  if (code === "tri_cd_desc") {
-    if (!colonneCD) {
-      afficherToast('Colonne "CD" introuvable.', "warning");
-      return;
-    }
-    store.setSort(colonneCD, "desc");
-    afficherToast("Tri decroissant applique sur CD.", "success");
+  if (code === "tri_date_desc") {
+    store.setSort("col_date_derniere_action", "desc");
+    afficherToast("Tri date dernière action décroissant.", "success");
     return;
   }
-
-  if (code === "filtre_clubs") {
-    if (!colonneClub) {
-      afficherToast('Colonne "Nom club" introuvable.', "warning");
-      return;
-    }
-    store.setFilters([creerFiltreRapide(colonneClub, "is_not_empty", "")]);
-    afficherToast("Filtre clubs applique.", "success");
-    return;
-  }
-
-  if (code === "filtre_regions") {
-    if (!colonneLigue) {
-      afficherToast('Colonne "Ligue/Region" introuvable.', "warning");
-      return;
-    }
-    store.setFilters([creerFiltreRapide(colonneLigue, "is_not_empty", "")]);
-    afficherToast("Filtre regions applique.", "success");
-    return;
-  }
-
-  if (code === "filtre_departements") {
-    if (!colonneCD) {
-      afficherToast('Colonne "CD/Departement" introuvable.', "warning");
-      return;
-    }
-    store.setFilters([creerFiltreRapide(colonneCD, "is_not_empty", "")]);
-    afficherToast("Filtre departements applique.", "success");
-    return;
-  }
-
-  if (code === "filtre_villes") {
-    if (!colonneVille) {
-      afficherToast('Aucune colonne "Ville" detectee pour ce filtre.', "warning");
-      return;
-    }
-    store.setFilters([creerFiltreRapide(colonneVille, "is_not_empty", "")]);
-    afficherToast("Filtre villes applique.", "success");
-    return;
-  }
-
-  if (code === "donnees_completes") {
-    const filtres = [];
-    if (colonneClub) {
-      filtres.push(creerFiltreRapide(colonneClub, "is_not_empty", ""));
-    }
-    if (colonneLigue) {
-      filtres.push(creerFiltreRapide(colonneLigue, "is_not_empty", ""));
-    }
-    if (colonneCD) {
-      filtres.push(creerFiltreRapide(colonneCD, "is_not_empty", ""));
-    }
-
-    if (!filtres.length) {
-      afficherToast("Aucune colonne exploitable pour ce filtre.", "warning");
-      return;
-    }
-
-    store.setFilters(filtres);
-    if (colonneClub) {
-      store.setSort(colonneClub, "asc");
-    }
-    afficherToast("Vue qualite appliquee (donnees non vides).", "success");
-    return;
-  }
-
   if (code === "reset_filtres") {
     store.clearFilters();
     store.clearSort();
@@ -336,8 +249,85 @@ function appliquerFiltreRapide(code) {
     if (dom.champRecherche) {
       dom.champRecherche.value = "";
     }
-    afficherToast("Filtres, tri et recherche reinitialises.", "info");
+    afficherToast("Filtres, tri et recherche réinitialisés.", "info");
   }
+}
+
+function appliquerPickerFiltre(pickerKey, value) {
+  const columnId = PICKER_TO_COLUMN[pickerKey];
+  if (!columnId) {
+    return;
+  }
+  // On retire les anciens filtres "equals" sur cette colonne pour éviter les doublons.
+  const autres = store.state.filters.filter(
+    (f) => !(f.columnId === columnId && f.operator === "equals"),
+  );
+  const safeValue = texte(value);
+  if (!safeValue) {
+    store.setFilters(autres);
+    return;
+  }
+  autres.push({
+    id: idRapide("quick"),
+    columnId,
+    operator: "equals",
+    value: safeValue,
+  });
+  store.setFilters(autres);
+  afficherToast(`Filtre appliqué : ${safeValue}.`, "success");
+}
+
+function valeursDistinctesPourColonne(columnId) {
+  const set = new Set();
+  store.state.rows.forEach((row) => {
+    const v = texte(row.values?.[columnId] || "");
+    if (v) {
+      set.add(v);
+    }
+  });
+  return Array.from(set).sort((a, b) => a.localeCompare(b, "fr", { sensitivity: "base" }));
+}
+
+function renderPickersFiltres() {
+  const root = dom.filtresRapides;
+  if (!root) {
+    return;
+  }
+  const selects = root.querySelectorAll("select[data-quick-picker]");
+  selects.forEach((select) => {
+    const key = select.dataset.quickPicker;
+    const columnId = PICKER_TO_COLUMN[key];
+    if (!columnId) {
+      return;
+    }
+
+    let options = [];
+    if (key === "role") {
+      options = ROLE_OPTIONS.slice();
+    } else if (key === "statut") {
+      options = STATUT_OPTIONS.slice();
+    } else {
+      options = valeursDistinctesPourColonne(columnId);
+    }
+
+    const activeFilter = store.state.filters.find(
+      (f) => f.columnId === columnId && f.operator === "equals",
+    );
+    const current = activeFilter ? activeFilter.value : "";
+
+    const html = [
+      `<option value="">${echapperHtml(PICKER_LABELS[key])}</option>`,
+    ]
+      .concat(
+        options.map(
+          (opt) =>
+            `<option value="${echapperHtml(opt)}" ${opt === current ? "selected" : ""}>${echapperHtml(opt)}</option>`,
+        ),
+      )
+      .join("");
+    select.innerHTML = html;
+    select.value = current;
+  });
 }
 
 function afficherToast(message, tone = "info") {
@@ -482,7 +472,7 @@ function confirmerImport() {
   };
 
   if (!mapping["Nom club"] || !mapping.Ligue || !mapping.CD) {
-    afficherToast("Selectionne les 3 colonnes: Nom club, Ligue, CD.", "warning");
+    afficherToast("Sélectionne les 3 colonnes : Nom du club, Région, Département.", "warning");
     return;
   }
 
@@ -492,13 +482,23 @@ function confirmerImport() {
   });
 
   if (!workspace.rows.length) {
-    afficherToast("Aucune ligne exploitable apres mapping.", "warning");
+    afficherToast("Aucune ligne exploitable après mapping.", "warning");
     return;
   }
 
+  if (store.hasData()) {
+    const ok = window.confirm(
+      "Cela remplacera toutes les données actuelles du tableau. Continuer ?",
+    );
+    if (!ok) {
+      return;
+    }
+  }
+
   store.resetWorkspace(workspace.columns, workspace.rows);
+  store.ensureProspectionSchema();
   fermerModalActive();
-  afficherToast(`${workspace.rows.length} lignes importees.`, "success");
+  afficherToast(`${workspace.rows.length} lignes importées.`, "success");
 }
 
 function renderFiltres() {
@@ -866,6 +866,35 @@ function ouvrirExport() {
   ouvrirModal(dom.modalExport);
 }
 
+function ouvrirConfirmSuppression() {
+  const rowId = store.state.selectedRowId;
+  if (!rowId) {
+    afficherToast("Aucune ligne sélectionnée.", "warning");
+    return;
+  }
+  const row = store.state.rows.find((r) => r.id === rowId);
+  if (!row) {
+    return;
+  }
+  ligneEnAttenteSuppression = rowId;
+
+  // Aperçu : nom du club + région si dispo
+  const nomClub = texte(row.values?.col_nom_club || "");
+  const region = texte(row.values?.col_region || "");
+  let apercu = "";
+  if (nomClub) {
+    apercu = nomClub;
+    if (region) {
+      apercu += ` — ${region}`;
+    }
+  }
+  if (dom.apercuLigneSuppression) {
+    dom.apercuLigneSuppression.textContent = apercu;
+  }
+
+  ouvrirModal(dom.modalConfirmSuppression);
+}
+
 function ouvrirPartage() {
   if (!store.hasData()) {
     afficherToast("Importe un PDF avant de partager.", "warning");
@@ -983,12 +1012,14 @@ async function chargerWorkspacePersistant() {
     }
 
     const data = await response.json().catch(() => ({}));
-    if (!data?.workspace) {
-      return;
-    }
 
     hydratationEnCours = true;
-    store.hydrateWorkspace(data.workspace);
+    if (data?.workspace) {
+      store.hydrateWorkspace(data.workspace);
+    }
+
+    // Migration douce + initialisation : garantit le schéma de prospection cible.
+    store.ensureProspectionSchema();
 
     if (dom.champRecherche) {
       dom.champRecherche.value = store.state.searchQuery || "";
@@ -999,6 +1030,8 @@ async function chargerWorkspacePersistant() {
     console.error(error);
   } finally {
     hydratationEnCours = false;
+    // Si la migration a apporté des changements, l'auto-save les persistera après debounce.
+    planifierSauvegardeWorkspace(400);
   }
 }
 
@@ -1009,6 +1042,7 @@ function renderInterface() {
   dom.sectionTableau.classList.toggle("hidden", !hasData);
 
   renderFiltres();
+  renderPickersFiltres();
 
   if (!hasData) {
     dom.statsTableau.textContent = "0 ligne";
@@ -1027,6 +1061,10 @@ function renderInterface() {
     ? `Colonne selectionnee: ${selected.name} | Double-clique une cellule pour modifier`
     : "Double-clique une cellule pour modifier";
 
+  if (dom.btnSupprimerLigne) {
+    dom.btnSupprimerLigne.disabled = !store.state.selectedRowId;
+  }
+
   grille.setData({
     columns,
     rows,
@@ -1043,6 +1081,32 @@ function bindEvents() {
 
   dom.btnExporterHaut?.addEventListener("click", ouvrirExport);
   dom.btnPartagerHaut?.addEventListener("click", ouvrirPartage);
+  dom.btnAjouterLigne?.addEventListener("click", () => {
+    const row = store.addRow();
+    if (!row) {
+      afficherToast("Aucune colonne disponible.", "warning");
+      return;
+    }
+    afficherToast("Nouvelle ligne ajoutée.", "success");
+    // Scroll en haut pour voir la nouvelle ligne (placée en tête).
+    if (dom.tableScroll) {
+      dom.tableScroll.scrollTop = 0;
+    }
+  });
+  dom.btnSupprimerLigne?.addEventListener("click", ouvrirConfirmSuppression);
+  dom.fermerConfirmSuppression?.addEventListener("click", fermerModalActive);
+  dom.annulerSuppression?.addEventListener("click", fermerModalActive);
+  dom.confirmerSuppression?.addEventListener("click", () => {
+    const rowId = ligneEnAttenteSuppression;
+    ligneEnAttenteSuppression = null;
+    fermerModalActive();
+    if (!rowId) {
+      return;
+    }
+    store.deleteRow(rowId);
+    afficherToast("Ligne supprimée.", "success");
+  });
+
   dom.btnAjouterColonne?.addEventListener("click", ouvrirAjoutColonne);
   dom.btnGererColonnes?.addEventListener("click", () => ouvrirModalEditionColonne());
 
@@ -1052,11 +1116,19 @@ function bindEvents() {
 
   dom.btnAjouterFiltre?.addEventListener("click", () => store.addFilter());
   dom.filtresRapides?.addEventListener("click", (event) => {
-    const bouton = event.target.closest("[data-quick-filter]");
+    const bouton = event.target.closest("button[data-quick-filter]");
     if (!bouton) {
       return;
     }
     appliquerFiltreRapide(bouton.dataset.quickFilter);
+  });
+
+  dom.filtresRapides?.addEventListener("change", (event) => {
+    const picker = event.target.closest("select[data-quick-picker]");
+    if (!picker) {
+      return;
+    }
+    appliquerPickerFiltre(picker.dataset.quickPicker, picker.value);
   });
 
   dom.champRecherche?.addEventListener("input", (event) => {
@@ -1157,6 +1229,33 @@ function bindEvents() {
 
   dom.genererLien?.addEventListener("click", genererLienPartage);
   dom.copierLien?.addEventListener("click", copierLienPartage);
+
+  // Désélectionner la ligne courante lorsque l'utilisateur clique en dehors du tableau.
+  document.addEventListener("click", (event) => {
+    if (!store.state.selectedRowId) {
+      return;
+    }
+    // Tout clic à l'intérieur de la carte du tableau garde la sélection
+    // (lignes, en-têtes, bouton "Supprimer la ligne", stats).
+    if (event.target.closest(".section-tableau")) {
+      return;
+    }
+    // Tout clic à l'intérieur d'une modal ne désélectionne pas
+    // (on garde la sélection pendant la confirmation de suppression).
+    if (event.target.closest(".modal")) {
+      return;
+    }
+    store.setSelectedRow(null);
+  });
+
+  // La touche Échap désélectionne (sauf pendant l'édition d'une cellule, gérée par la grille).
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    if (modalActive) return;
+    if (event.defaultPrevented) return;
+    if (!store.state.selectedRowId) return;
+    store.setSelectedRow(null);
+  });
 
   window.addEventListener("beforeunload", () => {
     if (hydratationEnCours) {

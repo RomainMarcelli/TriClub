@@ -799,6 +799,11 @@ def index():
     return render_template("index.html")
 
 
+@app.get("/tutoriel")
+def tutoriel_view():
+    return render_template("tutoriel.html")
+
+
 @app.get("/shared/<token>")
 def shared_view(token: str):
     try:
