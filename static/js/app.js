@@ -968,6 +968,15 @@ async function sauvegarderWorkspace() {
   }
 
   const payload = payloadWorkspace();
+
+  // Garde-fou : si on n'a aucune colonne en mémoire, on ne sauvegarde JAMAIS.
+  // Un workspace sans colonne ni ligne est presque toujours un état erroné
+  // (échec de chargement, race condition, etc.) qui écraserait des données réelles.
+  if (!payload.workspace.columns || payload.workspace.columns.length === 0) {
+    console.warn("Sauvegarde annulée : workspace sans colonne (état suspect).");
+    return;
+  }
+
   const signature = signatureWorkspace(payload);
   if (signature === derniereSignatureSauvegardee) {
     return;
@@ -1005,6 +1014,7 @@ async function sauvegarderWorkspace() {
 }
 
 async function chargerWorkspacePersistant() {
+  let chargementOk = false;
   try {
     const response = await fetch("/api/workspace", { method: "GET", headers: { Accept: "application/json" } });
     if (!response.ok) {
@@ -1026,11 +1036,22 @@ async function chargerWorkspacePersistant() {
     }
 
     derniereSignatureSauvegardee = signatureWorkspace(payloadWorkspace());
+    chargementOk = true;
   } catch (error) {
     console.error(error);
   } finally {
     hydratationEnCours = false;
-    // Si la migration a apporté des changements, l'auto-save les persistera après debounce.
+  }
+
+  // SECURITE : on ne déclenche JAMAIS d'auto-save tant qu'on n'a pas chargé l'état
+  // existant avec succès — sinon une coupure réseau au démarrage écraserait les
+  // données par un état vide.
+  if (!chargementOk) {
+    return;
+  }
+  // Si la migration a apporté des changements, l'auto-save les persistera après debounce.
+  // Mais seulement si on a des données (jamais auto-save un workspace vide).
+  if (store.state.columns.length > 0) {
     planifierSauvegardeWorkspace(400);
   }
 }
