@@ -4,9 +4,9 @@ import {
   DATABASE_STATES,
   buildWorkspaceSaveEnvelope,
   evaluateWorkspacePersistence,
+  getSupabaseResumeButtonState,
   getWorkspaceLoadErrorCode,
   isExplicitLastRowDeletion,
-  recoveryActionAfterProbe,
 } from "../../static/js/workspace-persistence.js";
 
 const columns = [{ id: "col_name", name: "Nom", type: "text" }];
@@ -39,25 +39,31 @@ test("un stockage indisponible interdit autosave et beacon", () => {
   assert.equal(decision({ storageAvailable: false, saveInProgress: true }).allowed, false);
 });
 
-test("les états Supabase en pause et reprise bloquent autosave et beacon", () => {
+test("un état Supabase en pause bloque autosave et beacon", () => {
   assert.deepEqual(decision({ databaseState: DATABASE_STATES.SUPABASE_PAUSED }), {
     allowed: false,
     reason: "database_supabase_paused",
   });
-  assert.deepEqual(decision({ databaseState: DATABASE_STATES.RESTORING }), {
-    allowed: false,
-    reason: "database_restoring",
-  });
 });
 
-test("une reprise exige toujours un rechargement GET avant de réautoriser la persistance", () => {
-  assert.deepEqual(recoveryActionAfterProbe(DATABASE_STATES.RESTORING, true), {
-    action: "reload_workspace",
-    persistenceAllowed: false,
+test("le bouton de reprise reste invisible hors pause et affiche son chargement", () => {
+  assert.deepEqual(getSupabaseResumeButtonState(DATABASE_STATES.AVAILABLE, false), {
+    visible: false,
+    disabled: false,
+    loading: false,
+    label: "Réactiver Supabase",
   });
-  assert.deepEqual(recoveryActionAfterProbe(DATABASE_STATES.RESTORING, false), {
-    action: "wait",
-    persistenceAllowed: false,
+  assert.deepEqual(getSupabaseResumeButtonState(DATABASE_STATES.SUPABASE_PAUSED, false), {
+    visible: true,
+    disabled: false,
+    loading: false,
+    label: "Réactiver Supabase",
+  });
+  assert.deepEqual(getSupabaseResumeButtonState(DATABASE_STATES.RESTORING, true), {
+    visible: true,
+    disabled: true,
+    loading: true,
+    label: "Réactivation en cours…",
   });
 });
 

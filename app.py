@@ -13,11 +13,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zlib
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 import pdfplumber
-from flask import Flask, jsonify, redirect, render_template, request, send_file, session, url_for
+from flask import Flask, jsonify, render_template, request, send_file, session, url_for
 from itsdangerous import BadSignature, URLSafeSerializer
 
 try:
@@ -55,7 +55,6 @@ app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SECURE=bool(os.environ.get("RENDER")),
     SESSION_COOKIE_SAMESITE="Lax",
-    PERMANENT_SESSION_LIFETIME=timedelta(hours=12),
 )
 
 
@@ -64,7 +63,7 @@ def add_security_headers(response):
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "same-origin")
-    if request.path in {"/", "/login"} or request.path.startswith("/api/"):
+    if request.path == "/" or request.path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-store"
     return response
 
@@ -79,8 +78,6 @@ SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").stri
 SUPABASE_MANAGEMENT_TOKEN = os.environ.get("SUPABASE_MANAGEMENT_TOKEN", "").strip()
 SUPABASE_PROJECT_REF = os.environ.get("SUPABASE_PROJECT_REF", "").strip()
 KEEPALIVE_TOKEN = os.environ.get("KEEPALIVE_TOKEN", "").strip()
-TRICLUB_USER_PASSWORD = os.environ.get("TRICLUB_USER_PASSWORD", "")
-TRICLUB_ADMIN_PASSWORD = os.environ.get("TRICLUB_ADMIN_PASSWORD", "")
 HAS_SUPABASE_REST = bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
 if SUPABASE_DB_URL:
     DB_BACKEND = "postgres"
@@ -101,6 +98,7 @@ WORKSPACE_WRITE_LOCK = threading.Lock()
 WORKSPACE_RECOVERY_LOCK = threading.Lock()
 WORKSPACE_RECOVERY_STATE = "idle"
 WORKSPACE_READ_EPOCH = secrets.token_urlsafe(24)
+SUPABASE_PAUSE_CONFIRMED = False
 try:
     WORKSPACE_BACKUP_INTERVAL_SECONDS = max(
         60,
@@ -135,23 +133,6 @@ def get_storage_backend() -> str:
     return STORAGE_BACKEND_LAST or DB_BACKEND
 
 
-def current_user_role() -> str:
-    role = session.get("role", "")
-    return role if role in {"user", "admin"} else ""
-
-
-def is_admin_session() -> bool:
-    return current_user_role() == "admin"
-
-
-def authentication_is_configured() -> bool:
-    return bool(
-        TRICLUB_USER_PASSWORD
-        and TRICLUB_ADMIN_PASSWORD
-        and not secrets.compare_digest(TRICLUB_USER_PASSWORD, TRICLUB_ADMIN_PASSWORD)
-    )
-
-
 def set_workspace_recovery_state(value: str) -> None:
     global WORKSPACE_RECOVERY_STATE
     if value not in {"idle", "operation", "awaiting_read"}:
@@ -170,17 +151,47 @@ def begin_workspace_recovery() -> str:
             return WORKSPACE_READ_EPOCH
 
 
+def begin_supabase_recovery_if_paused() -> str | None:
+    """Atomically start a resume only after this process observed a real pause."""
+    global WORKSPACE_READ_EPOCH, WORKSPACE_RECOVERY_STATE
+    with WORKSPACE_WRITE_LOCK:
+        with WORKSPACE_RECOVERY_LOCK:
+            if not SUPABASE_PAUSE_CONFIRMED:
+                return None
+            WORKSPACE_READ_EPOCH = secrets.token_urlsafe(24)
+            WORKSPACE_RECOVERY_STATE = "operation"
+            return WORKSPACE_READ_EPOCH
+
+
+def require_fresh_reads_after_paused_storage() -> str:
+    """Rotate once when a paused project is observed, then wait for a successful read."""
+    global SUPABASE_PAUSE_CONFIRMED, WORKSPACE_READ_EPOCH, WORKSPACE_RECOVERY_STATE
+    with WORKSPACE_WRITE_LOCK:
+        with WORKSPACE_RECOVERY_LOCK:
+            SUPABASE_PAUSE_CONFIRMED = True
+            if WORKSPACE_RECOVERY_STATE == "idle":
+                WORKSPACE_READ_EPOCH = secrets.token_urlsafe(24)
+                WORKSPACE_RECOVERY_STATE = "awaiting_read"
+            return WORKSPACE_READ_EPOCH
+
+
+def supabase_pause_is_confirmed() -> bool:
+    with WORKSPACE_RECOVERY_LOCK:
+        return SUPABASE_PAUSE_CONFIRMED
+
+
 def is_workspace_recovery_pending() -> bool:
     with WORKSPACE_RECOVERY_LOCK:
         return WORKSPACE_RECOVERY_STATE != "idle"
 
 
 def complete_workspace_recovery_after_read() -> str | None:
-    global WORKSPACE_RECOVERY_STATE
+    global SUPABASE_PAUSE_CONFIRMED, WORKSPACE_RECOVERY_STATE
     with WORKSPACE_RECOVERY_LOCK:
         if WORKSPACE_RECOVERY_STATE == "operation":
             return None
         WORKSPACE_RECOVERY_STATE = "idle"
+        SUPABASE_PAUSE_CONFIRMED = False
         return WORKSPACE_READ_EPOCH
 
 
@@ -230,38 +241,6 @@ def csrf_token_is_valid() -> bool:
     if not supplied:
         supplied = clean_cell(request.form.get("csrf_token", ""))
     return bool(expected and supplied and secrets.compare_digest(expected, supplied))
-
-
-def require_user_page(view):
-    @functools.wraps(view)
-    def wrapped(*args, **kwargs):
-        if not current_user_role():
-            return redirect(url_for("login"))
-        return view(*args, **kwargs)
-
-    return wrapped
-
-
-def require_user_api(view):
-    @functools.wraps(view)
-    def wrapped(*args, **kwargs):
-        if not current_user_role():
-            return jsonify({"error": "authentication_required"}), 401
-        return view(*args, **kwargs)
-
-    return wrapped
-
-
-def require_admin_api(view):
-    @functools.wraps(view)
-    def wrapped(*args, **kwargs):
-        if not current_user_role():
-            return jsonify({"error": "authentication_required"}), 401
-        if not is_admin_session():
-            return jsonify({"error": "admin_required"}), 403
-        return view(*args, **kwargs)
-
-    return wrapped
 
 
 def require_csrf(view):
@@ -1537,23 +1516,27 @@ def save_workspace_state_conditionally(
 
 
 def restore_workspace_backup(backup_id: int) -> dict[str, Any] | None:
-    with WORKSPACE_WRITE_LOCK:
-        backup = load_workspace_backup(backup_id)
-        if backup is None:
-            return None
+    begin_workspace_recovery()
+    try:
+        with WORKSPACE_WRITE_LOCK:
+            backup = load_workspace_backup(backup_id)
+            if backup is None:
+                return None
 
-        current_record = load_workspace_record()
-        if current_record is None:
-            raise RuntimeError("Aucun workspace courant a sauvegarder avant restauration.")
+            current_record = load_workspace_record()
+            if current_record is None:
+                raise RuntimeError("Aucun workspace courant a sauvegarder avant restauration.")
 
-        create_backup_and_prune(current_record, "before_admin_restore")
-        revision = save_workspace_state(backup["workspace"])
-        row_count, column_count = workspace_backup_counts(backup["workspace"])
-        return {
-            "revision": revision,
-            "row_count": row_count,
-            "column_count": column_count,
-        }
+            create_backup_and_prune(current_record, "before_restore")
+            revision = save_workspace_state(backup["workspace"])
+            row_count, column_count = workspace_backup_counts(backup["workspace"])
+            return {
+                "revision": revision,
+                "row_count": row_count,
+                "column_count": column_count,
+            }
+    finally:
+        set_workspace_recovery_state("awaiting_read")
 
 
 def probe_workspace_storage_sqlite() -> None:
@@ -1599,10 +1582,11 @@ class SupabaseManagementError(RuntimeError):
 
 
 def request_supabase_project_restore() -> None:
+    """Request restoration of the configured project without exposing credentials."""
     if not SUPABASE_MANAGEMENT_TOKEN or not SUPABASE_PROJECT_REF:
         raise SupabaseManagementError(
             "supabase_management_not_configured",
-            "SUPABASE_MANAGEMENT_TOKEN ou SUPABASE_PROJECT_REF manquant.",
+            "La reprise Supabase n'est pas configuree sur le serveur.",
             503,
         )
 
@@ -1633,7 +1617,7 @@ def request_supabase_project_restore() -> None:
         if error.code in {401, 403}:
             raise SupabaseManagementError(
                 "supabase_restore_refused",
-                "La Management API Supabase a refuse l'autorisation.",
+                "La Management API Supabase a refuse l'autorisation du serveur.",
                 502,
             ) from error
         if error.code == 429:
@@ -1644,7 +1628,7 @@ def request_supabase_project_restore() -> None:
             ) from error
         raise SupabaseManagementError(
             "supabase_restore_refused",
-            f"La Management API Supabase a refuse la restauration (HTTP {error.code}).",
+            f"La Management API Supabase a refuse la reprise (HTTP {error.code}).",
             502,
         ) from error
     except (urllib.error.URLError, TimeoutError) as error:
@@ -1655,84 +1639,12 @@ def request_supabase_project_restore() -> None:
         ) from error
 
 
-@app.route("/login", methods=["GET", "POST"])
-def login():
-    if request.method == "GET":
-        if current_user_role():
-            return redirect(url_for("index"))
-        return render_template(
-            "login.html",
-            csrf_token=get_csrf_token(),
-            authentication_configured=authentication_is_configured(),
-            error="",
-        )
-
-    if not authentication_is_configured():
-        return (
-            render_template(
-                "login.html",
-                csrf_token=get_csrf_token(),
-                authentication_configured=False,
-                error="Authentification non configuree sur le serveur.",
-            ),
-            503,
-        )
-    if not csrf_token_is_valid():
-        return (
-            render_template(
-                "login.html",
-                csrf_token=get_csrf_token(),
-                authentication_configured=True,
-                error="Session expiree. Recharge la page et reessaie.",
-            ),
-            403,
-        )
-
-    password = request.form.get("password", "")
-    role = ""
-    if secrets.compare_digest(password, TRICLUB_ADMIN_PASSWORD):
-        role = "admin"
-    elif secrets.compare_digest(password, TRICLUB_USER_PASSWORD):
-        role = "user"
-    if not role:
-        return (
-            render_template(
-                "login.html",
-                csrf_token=get_csrf_token(),
-                authentication_configured=True,
-                error="Mot de passe incorrect.",
-            ),
-            401,
-        )
-
-    session.clear()
-    session["role"] = role
-    session["csrf_token"] = secrets.token_urlsafe(32)
-    invalidate_session_workspace_read()
-    session.permanent = True
-    return redirect(url_for("index"))
-
-
-@app.post("/logout")
-@require_user_api
-@require_csrf
-def logout():
-    session.clear()
-    return redirect(url_for("login"))
-
-
 @app.get("/")
-@require_user_page
 def index():
-    return render_template(
-        "index.html",
-        current_user_is_admin=is_admin_session(),
-        csrf_token=get_csrf_token(),
-    )
+    return render_template("index.html", csrf_token=get_csrf_token())
 
 
 @app.get("/tutoriel")
-@require_user_page
 def tutoriel_view():
     return render_template("tutoriel.html")
 
@@ -1749,7 +1661,6 @@ def shared_view(token: str):
 
 
 @app.post("/api/extract")
-@require_user_api
 @require_csrf
 def api_extract():
     pdf_file = request.files.get("pdf_file")
@@ -1800,7 +1711,6 @@ def api_extract():
 
 
 @app.post("/api/export")
-@require_user_api
 @require_csrf
 def api_export():
     data = request.get_json(silent=True) or {}
@@ -1841,7 +1751,6 @@ def api_export():
 
 
 @app.post("/api/share")
-@require_user_api
 @require_csrf
 def api_share():
     data = request.get_json(silent=True) or {}
@@ -1880,21 +1789,23 @@ def api_share():
 
 
 @app.get("/api/workspace")
-@require_user_api
 def api_workspace_get():
     try:
         record = load_workspace_record()
     except Exception as error:
         invalidate_session_workspace_read()
         app.logger.exception("Workspace load failed: %s", error)
-        error_code = "supabase_paused" if is_supabase_paused_error(error) else "workspace_storage_unavailable"
+        paused = is_supabase_paused_error(error)
+        if paused:
+            require_fresh_reads_after_paused_storage()
+        error_code = "supabase_paused" if paused else "workspace_storage_unavailable"
         return (
             jsonify(
                 {
                     "workspace": None,
                     "exists": False,
                     "error": error_code,
-                    "is_admin": is_admin_session(),
+                    "csrf_token": get_csrf_token(),
                     "storage_backend": get_storage_backend(),
                     "preferred_storage_backend": DB_BACKEND,
                     "hint": "Verifie la configuration Supabase et la connectivite serveur.",
@@ -1906,7 +1817,17 @@ def api_workspace_get():
     read_epoch = complete_workspace_recovery_after_read()
     if read_epoch is None:
         invalidate_session_workspace_read()
-        return jsonify({"error": "workspace_recovery_in_progress", "workspace": None, "exists": False}), 503
+        return (
+            jsonify(
+                {
+                    "error": "workspace_recovery_in_progress",
+                    "workspace": None,
+                    "exists": False,
+                    "csrf_token": get_csrf_token(),
+                }
+            ),
+            503,
+        )
     mark_session_workspace_read(read_epoch)
 
     if record is None:
@@ -1914,9 +1835,9 @@ def api_workspace_get():
             {
                 "workspace": None,
                 "exists": False,
+                "csrf_token": get_csrf_token(),
                 "storage_backend": get_storage_backend(),
                 "preferred_storage_backend": DB_BACKEND,
-                "is_admin": is_admin_session(),
             }
         )
 
@@ -1924,9 +1845,9 @@ def api_workspace_get():
         "workspace": record["workspace"],
         "exists": True,
         "revision": record["revision"],
+        "csrf_token": get_csrf_token(),
         "storage_backend": get_storage_backend(),
         "preferred_storage_backend": DB_BACKEND,
-        "is_admin": is_admin_session(),
     }
     if get_storage_backend() == "sqlite":
         response["db_path"] = DB_ACTIVE_PATH
@@ -1934,7 +1855,6 @@ def api_workspace_get():
 
 
 @app.post("/api/workspace")
-@require_user_api
 @require_csrf
 def api_workspace_post():
     if is_workspace_recovery_pending() or not session_workspace_read_is_current():
@@ -2021,7 +1941,10 @@ def api_workspace_post():
     except Exception as error:
         invalidate_session_workspace_read()
         app.logger.exception("Workspace save failed: %s", error)
-        error_code = "supabase_paused" if is_supabase_paused_error(error) else "workspace_storage_unavailable"
+        paused = is_supabase_paused_error(error)
+        if paused:
+            require_fresh_reads_after_paused_storage()
+        error_code = "supabase_paused" if paused else "workspace_storage_unavailable"
         return (
             jsonify(
                 {
@@ -2055,7 +1978,10 @@ def api_system_keepalive():
         probe_workspace_storage()
     except Exception as error:
         app.logger.warning("Keepalive database probe failed: %s", error)
-        error_code = "supabase_paused" if is_supabase_paused_error(error) else "workspace_storage_unavailable"
+        paused = is_supabase_paused_error(error)
+        if paused:
+            require_fresh_reads_after_paused_storage()
+        error_code = "supabase_paused" if paused else "workspace_storage_unavailable"
         return jsonify({"status": "error", "database": "unavailable", "error": error_code}), 503
 
     response = jsonify({"status": "ok", "database": "available"})
@@ -2063,74 +1989,33 @@ def api_system_keepalive():
     return response
 
 
-@app.get("/api/admin/backups")
-@require_admin_api
-def api_admin_backups_list():
-    try:
-        backups = list_workspace_backups(limit=50)
-    except Exception as error:
-        app.logger.exception("Workspace backup listing failed: %s", error)
-        return jsonify({"error": "workspace_backups_unavailable"}), 503
-    return jsonify({"backups": backups, "retention_count": WORKSPACE_BACKUP_RETENTION_COUNT})
-
-
-@app.post("/api/admin/backups")
-@require_admin_api
+@app.post("/api/system/supabase/resume")
 @require_csrf
-def api_admin_backups_create():
-    try:
-        with WORKSPACE_WRITE_LOCK:
-            current_record = load_workspace_record()
-            if current_record is None:
-                return jsonify({"error": "workspace_not_found"}), 404
-            backup = create_backup_and_prune(current_record, "manual_admin")
-    except Exception as error:
-        app.logger.exception("Manual workspace backup failed: %s", error)
-        return jsonify({"error": "workspace_backups_unavailable"}), 503
-    return jsonify({"status": "backup_created", "backup": backup}), 201
+def api_system_supabase_resume():
+    if begin_supabase_recovery_if_paused() is None:
+        return (
+            jsonify(
+                {
+                    "error": "supabase_pause_not_confirmed",
+                    "message": "La reprise est refusee car aucune pause Supabase n'a ete detectee.",
+                }
+            ),
+            409,
+        )
 
-
-@app.post("/api/admin/backups/<int:backup_id>/restore")
-@require_admin_api
-@require_csrf
-def api_admin_backup_restore(backup_id: int):
-    data = request.get_json(silent=True) or {}
-    if data.get("confirm") != "RESTORE":
-        return jsonify({"error": "restore_confirmation_required"}), 400
-
-    begin_workspace_recovery()
-    invalidate_session_workspace_read()
-    try:
-        result = restore_workspace_backup(backup_id)
-    except Exception as error:
-        set_workspace_recovery_state("awaiting_read")
-        app.logger.exception("Workspace backup restore failed for id=%s: %s", backup_id, error)
-        return jsonify({"error": "workspace_restore_failed"}), 503
-    if result is None:
-        set_workspace_recovery_state("idle")
-        return jsonify({"error": "workspace_backup_not_found"}), 404
-
-    set_workspace_recovery_state("awaiting_read")
-    app.logger.warning("Admin restored workspace backup id=%s", backup_id)
-    return jsonify({"status": "restored", **result})
-
-
-@app.post("/api/admin/supabase/resume")
-@require_admin_api
-@require_csrf
-def api_admin_supabase_resume():
-    begin_workspace_recovery()
     invalidate_session_workspace_read()
     try:
         request_supabase_project_restore()
     except SupabaseManagementError as error:
         set_workspace_recovery_state("awaiting_read")
-        app.logger.warning("Supabase restore request failed for project ref=%s: %s", SUPABASE_PROJECT_REF, error.code)
+        if error.code == "supabase_project_already_active":
+            return jsonify({"status": "restore_requested", "already_active": True}), 202
+        app.logger.warning("Supabase restore request failed: %s", error.code)
         return jsonify({"error": error.code, "message": str(error)}), error.http_status
 
     set_workspace_recovery_state("awaiting_read")
-    app.logger.warning("Supabase restore requested for project ref=%s", SUPABASE_PROJECT_REF)
-    return jsonify({"status": "restore_requested"})
+    app.logger.warning("Supabase restore requested after confirmed paused state")
+    return jsonify({"status": "restore_requested"}), 202
 
 
 @app.get("/api/health")

@@ -76,24 +76,24 @@ gunicorn app:app --timeout 180 --workers 1 --threads 2
 
 Set these environment variables on Render:
 
-- `APP_SECRET_KEY` (long random value; required for stable and secure sessions)
-- `TRICLUB_USER_PASSWORD` (standard user access)
-- `TRICLUB_ADMIN_PASSWORD` (admin access; must be different from the user password)
+- `APP_SECRET_KEY` (long random value; required for stable anonymous CSRF/read-epoch sessions)
 - `SUPABASE_DB_URL` (optional if direct Postgres access works)
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
 - `KEEPALIVE_TOKEN` (long random Bearer token, dedicated to the keepalive route)
-- `SUPABASE_PROJECT_REF` (only needed for admin project resume)
-- `SUPABASE_MANAGEMENT_TOKEN` (only needed for admin project resume)
+- `SUPABASE_PROJECT_REF` (project targeted by the paused-project resume button)
+- `SUPABASE_MANAGEMENT_TOKEN` (server-only token allowed to restore that project)
 
 Optional backup settings:
 
 - `WORKSPACE_BACKUP_INTERVAL_SECONDS` (default `900`, minimum `60`)
 - `WORKSPACE_BACKUP_RETENTION_COUNT` (default `40`, bounded from `5` to `200`)
 
-`SUPABASE_SERVICE_ROLE_KEY` and `SUPABASE_MANAGEMENT_TOKEN` are different
-credentials. Both must stay in Render's server-side environment. They must never
-be put in HTML, JavaScript, GitHub variables, logs, or browser storage.
+`SUPABASE_SERVICE_ROLE_KEY` and `SUPABASE_MANAGEMENT_TOKEN` are separate
+credentials. Both must stay in Render's server-side environment and must never
+be put in HTML, JavaScript, GitHub variables, logs, or browser storage. The
+browser only calls a fixed Flask resume endpoint; it never receives either
+credential or chooses a project reference.
 
 Storage behavior:
 
@@ -112,8 +112,7 @@ It creates `workspace_backups`, enables RLS, removes access from `anon` and
 needed by the application. The application does not modify any pre-existing
 backup system or `/backups` directory.
 
-After deployment, log in and check `GET /api/workspace`. Expected when storage
-is healthy:
+After deployment, check `GET /api/workspace`. Expected when storage is healthy:
 
 - `"exists": true` or `"exists": false` (if no data yet)
 - HTTP 200 and no `"error": "workspace_storage_unavailable"`
@@ -122,17 +121,24 @@ When storage is unavailable, `GET /api/workspace` returns HTTP 503. Workspace
 writes require the revision returned by a successful GET, so a failed read
 cannot be converted into a new empty workspace.
 
-## Authentication and CSRF
+## Public Access and CSRF
 
-- `/` redirects anonymous visitors to `/login`.
-- The standard password can use the workspace APIs.
-- The admin password additionally grants backup and Supabase resume APIs.
-- Every mutating route requires the session CSRF token, including the unload
-  beacon used by workspace autosave.
-- Sessions use `HttpOnly`, `SameSite=Lax` cookies; Render production cookies are
-  also `Secure`.
-- Configuration fails closed when either password is missing or both passwords
-  are identical.
+TriClub is public and has no account, login page, user password, or admin role.
+The main page and workspace, extraction, export, and sharing APIs are usable
+without authentication.
+
+Every mutating browser route still requires an anonymous-session CSRF token.
+The token is rendered on `/` and is also returned by `GET /api/workspace`, so a
+direct API client can establish its anonymous session before writing. JSON
+requests use `X-CSRF-Token`; the unload beacon sends the same token as the
+top-level `csrfToken` field. Sessions use `HttpOnly`, `SameSite=Lax` cookies;
+Render production cookies are also `Secure`.
+
+CSRF is a cross-site browser protection, not authorization: because the
+application is intentionally public, anyone can deliberately load it and use
+its normal workspace features. The fixed Supabase resume endpoint also requires
+CSRF and refuses requests unless this server process has first confirmed a real
+paused-project response.
 
 ## Versioned Workspace Backups
 
@@ -141,13 +147,14 @@ Before an existing workspace is changed, the server creates snapshots:
 - periodically, at most once per configured interval;
 - immediately before an explicit transition from non-empty to empty;
 - immediately before any row deletion;
-- immediately before an admin restore;
-- manually from the admin panel.
+- immediately before an internal restore operation.
 
-Admin listing returns metadata only, never the stored JSON payload. Restoring a
-snapshot first backs up the current workspace, writes the selected snapshot,
-and generates a new revision. Any browser still holding the prior revision then
-receives HTTP 409 and must reload.
+There is no public HTTP route or browser panel for listing, creating, or
+restoring backups. Automatic backup creation remains part of the server-side
+safe write path. An internal restore first backs up the current workspace,
+writes the selected snapshot, and generates a new revision. Any browser still
+holding the prior read epoch must reload before it can write again; optimistic
+revision locking remains active as a second guard.
 
 Retention is applied after every snapshot. Backup creation is part of the safe
 write path: if a required snapshot cannot be created, the workspace mutation is
@@ -177,19 +184,22 @@ once after configuration and verify a successful response.
 ## Paused Supabase Recovery
 
 Storage errors and a paused Supabase project have distinct API/UI states. While
-the project is paused or restoring, local controls, autosave, scheduled saves,
-and `sendBeacon` are blocked.
+the project is paused, local controls, autosave, scheduled saves, and
+`sendBeacon` are blocked. Only after the backend identifies a real paused state,
+the header displays **Réactiver Supabase**. The button calls the fixed
+server-side resume route; the Management API token stays on the server.
 
-The admin-only resume button calls the Supabase Management API from Flask with
-`POST /v1/projects/{project_ref}/restore`. The management token requires project
-write/admin permission. The browser never receives that token. After requesting
-resume, the UI polls with `GET /api/workspace`; persistence is re-enabled only
-after a successful full GET and hydration. No stale POST is sent first.
+During resume, the button is disabled with a spinner and all workspace writes
+remain blocked. The browser periodically retries `GET /api/workspace`. A
+successful full GET hydrates the remote data and records the current read epoch
+before autosave is re-enabled and the button is hidden. A failed or timed-out
+resume leaves persistence blocked and makes the button available for retry.
 
-The server rotates an in-memory workspace read epoch whenever a restore or
-Supabase resume starts. Every browser session must perform its own successful
-`GET /api/workspace` and receive the current epoch before it may write again.
-This is safe with the current Render command using one Gunicorn worker. If the
+When a paused project is detected, and whenever an internal restore starts, the
+server rotates an in-memory workspace read epoch. Every anonymous browser
+session must then perform its own successful `GET /api/workspace` before it may
+write again. The first successful GET never reauthorizes other sessions. This
+is safe with the current Render command using one Gunicorn worker. If the
 application later uses multiple workers or instances, move the recovery state
 and read epoch to shared storage (for example PostgreSQL) before scaling out.
 
@@ -197,12 +207,12 @@ and read epoch to shared storage (for example PostgreSQL) before scaling out.
 
 1. Take/verify an external Supabase backup according to the existing production procedure.
 2. Apply `20260901_workspace_backups.sql` and verify the table/index/RLS grants.
-3. Add the Render secrets above, using distinct random values.
+3. Add the Render secrets above, including the server-only Management API credentials.
 4. Deploy the application; do not run a standalone restore script.
-5. Test standard and admin login, then verify `GET /api/workspace` returns the expected row count and a revision.
-6. Create one manual backup in the admin panel and verify metadata listing.
+5. Verify that `/` is public and `GET /api/workspace` returns the expected row count and a revision.
+6. Verify automatic backup creation through the normal server-side validation procedure.
 7. Configure the GitHub variable/secret and manually run the keepalive workflow.
-8. Test restore/resume only against a non-production project first.
+8. Test internal restore and the resume button only against a non-production project first.
 
 This repository does not automatically alter the production Supabase project,
 push Git commits, or invoke a restore during deployment.
@@ -214,10 +224,7 @@ push Git commits, or invoke a restore during deployment.
 - `POST /api/share` - generate signed share link for read-only page
 - `GET /api/workspace` - load the workspace and its persistence revision
 - `POST /api/workspace` - save with optimistic revision and empty-state safeguards
-- `GET /api/admin/backups` - admin-only backup metadata
-- `POST /api/admin/backups` - admin-only manual backup
-- `POST /api/admin/backups/<id>/restore` - admin-only confirmed restore
-- `POST /api/admin/supabase/resume` - admin-only server-side Supabase resume request
 - `GET /api/system/keepalive` - dedicated Bearer-protected database read
+- `POST /api/system/supabase/resume` - CSRF-protected fixed-project resume, enabled only after confirmed pause
 - `GET /shared/<token>` - read-only shared dataset view
 - `GET /api/health` - health check

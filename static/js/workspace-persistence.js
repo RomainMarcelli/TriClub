@@ -95,19 +95,16 @@ export function buildWorkspaceSaveEnvelope(workspace, {
   };
 }
 
-export function recoveryActionAfterProbe(databaseState, probeSucceeded) {
-  if (!probeSucceeded) {
-    return { action: "wait", persistenceAllowed: false };
-  }
-  if (
-    databaseState === DATABASE_STATES.SUPABASE_PAUSED ||
-    databaseState === DATABASE_STATES.RESTORING ||
-    databaseState === DATABASE_STATES.UNAVAILABLE ||
-    databaseState === DATABASE_STATES.CONFLICT
-  ) {
-    return { action: "reload_workspace", persistenceAllowed: false };
-  }
-  return { action: "none", persistenceAllowed: databaseState === DATABASE_STATES.AVAILABLE };
+export function getSupabaseResumeButtonState(databaseState, inProgress) {
+  const loading = inProgress === true;
+  return {
+    visible:
+      databaseState === DATABASE_STATES.SUPABASE_PAUSED ||
+      (loading && databaseState === DATABASE_STATES.RESTORING),
+    disabled: loading,
+    loading,
+    label: loading ? "Réactivation en cours…" : "Réactiver Supabase",
+  };
 }
 
 export function isExplicitLastRowDeletion(event, currentRowCount) {

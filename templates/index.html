@@ -7,7 +7,7 @@
     <title>Ben - Espace de donnees</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
   </head>
-  <body data-is-admin="{{ 'true' if current_user_is_admin else 'false' }}">
+  <body>
     <div class="fond-orbe orbe-a"></div>
     <div class="fond-orbe orbe-b"></div>
 
@@ -26,6 +26,15 @@
             <span class="database-status-dot"></span>
             <span id="databaseStatusLabel">Vérification de la base…</span>
           </span>
+          <button
+            id="btnResumeSupabase"
+            class="btn-primaire btn-resume-supabase hidden"
+            type="button"
+            aria-busy="false"
+          >
+            <span id="resumeSupabaseSpinner" class="resume-supabase-spinner hidden" aria-hidden="true"></span>
+            <span id="resumeSupabaseLabel">Réactiver Supabase</span>
+          </button>
           <a href="{{ url_for('tutoriel_view') }}" class="btn-tuto" target="_blank" rel="noopener" title="Ouvrir le guide d'utilisation">
             <span class="btn-tuto-icone">?</span>
             <span class="btn-tuto-label">Tutoriel</span>
@@ -33,32 +42,8 @@
           <button id="btnImporterHaut" class="btn-primaire" type="button">Importer un PDF</button>
           <button id="btnExporterHaut" class="btn-secondaire" type="button">Exporter</button>
           <button id="btnPartagerHaut" class="btn-secondaire" type="button">Partager</button>
-          <form method="post" action="{{ url_for('logout') }}" class="logout-form">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-            <button class="btn-secondaire" type="submit">Déconnexion</button>
-          </form>
         </div>
       </header>
-
-      {% if current_user_is_admin %}
-      <section id="adminPanel" class="carte admin-panel">
-        <div id="supabasePausedPanel" class="admin-alert hidden">
-          <div>
-            <strong>Projet Supabase en pause</strong>
-            <p id="supabasePausedMessage" class="texte-discret">Les écritures sont bloquées jusqu’à la reprise et au rechargement complet.</p>
-          </div>
-          <button id="btnResumeSupabase" class="btn-primaire" type="button">Relancer Supabase</button>
-        </div>
-        <details>
-          <summary>Administration des sauvegardes</summary>
-          <div class="admin-backup-actions">
-            <p class="texte-discret">Une sauvegarde automatique est créée périodiquement et avant les opérations destructives.</p>
-            <button id="btnCreerBackup" class="btn-secondaire petit" type="button">Créer un backup</button>
-          </div>
-          <div id="listeBackups" class="backup-list"><p class="texte-discret">Chargement…</p></div>
-        </details>
-      </section>
-      {% endif %}
 
       <section class="carte barre-outils">
         <input id="champRecherche" class="champ-recherche" type="text" placeholder="Rechercher dans tout le tableau..." />

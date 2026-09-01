@@ -34,6 +34,6 @@ python -m pytest tests/ -v
 Couvre :
 - `tests/test_sanitization.py` — fonctions de nettoyage (`clean_cell`, `normalize_text`, `sanitize_columns`, `sanitize_rows`, `sanitize_filters`, `sanitize_workspace_state`).
 - `tests/test_api.py` — endpoints HTTP, panne de stockage, révisions optimistes et protection contre les écrasements vides.
-- `tests/test_security_backups.py` — sessions, rôles, CSRF, backups versionnés, rétention, restauration, keepalive et reprise Supabase simulée.
+- `tests/test_security_backups.py` — accès public, CSRF anonyme, absence de routes admin, backups automatiques, rétention, epochs multi-session, keepalive et reprise Supabase simulée sans fuite du token Management API.
 
 Les tests Python utilisent une base SQLite isolée par test (via `tmp_path`).

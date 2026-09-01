@@ -7,9 +7,9 @@ import {
   WORKSPACE_LOAD_STATES,
   buildWorkspaceSaveEnvelope,
   evaluateWorkspacePersistence,
+  getSupabaseResumeButtonState,
   getWorkspaceLoadErrorCode,
   isExplicitLastRowDeletion,
-  recoveryActionAfterProbe,
 } from "./workspace-persistence.js";
 
 const dom = {
@@ -104,16 +104,13 @@ const dom = {
   toast: document.getElementById("toast"),
   databaseStatus: document.getElementById("databaseStatus"),
   databaseStatusLabel: document.getElementById("databaseStatusLabel"),
-  supabasePausedPanel: document.getElementById("supabasePausedPanel"),
-  supabasePausedMessage: document.getElementById("supabasePausedMessage"),
   btnResumeSupabase: document.getElementById("btnResumeSupabase"),
-  btnCreerBackup: document.getElementById("btnCreerBackup"),
-  listeBackups: document.getElementById("listeBackups"),
+  resumeSupabaseSpinner: document.getElementById("resumeSupabaseSpinner"),
+  resumeSupabaseLabel: document.getElementById("resumeSupabaseLabel"),
 };
 
 const RAISONS_SANS_SAUVEGARDE = new Set(["setSelectedColumn", "setSelectedRow"]);
 const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content || "";
-const utilisateurAdmin = document.body.dataset.isAdmin === "true";
 
 let hydratationEnCours = false;
 let timerSauvegarde = null;
@@ -130,6 +127,7 @@ let workspaceExistsOnServer = false;
 let workspaceRevision = null;
 let dernierNombreLignesServeur = 0;
 let suppressionTotaleLignesConfirmee = false;
+let reactivationSupabaseEnCours = false;
 
 const store = new WorkspaceStore((event = {}) => {
   if (isExplicitLastRowDeletion(event, store.state.rows.length)) {
@@ -384,12 +382,8 @@ function jsonHeaders() {
   return { "Content-Type": "application/json", "X-CSRF-Token": csrfToken };
 }
 
-function redirigerSiSessionExpiree(response, data = {}) {
-  if (response.status === 401 && data?.error === "authentication_required") {
-    window.location.assign("/login");
-    return true;
-  }
-  return false;
+function attendre(delay) {
+  return new Promise((resolve) => window.setTimeout(resolve, delay));
 }
 
 function afficherStatutBase(label, cssState) {
@@ -398,6 +392,20 @@ function afficherStatutBase(label, cssState) {
   }
   dom.databaseStatusLabel.textContent = label;
   dom.databaseStatus.className = `database-status is-${cssState}`;
+}
+
+function mettreAJourBoutonReactivationSupabase() {
+  if (!dom.btnResumeSupabase) {
+    return;
+  }
+  const state = getSupabaseResumeButtonState(databaseState, reactivationSupabaseEnCours);
+  dom.btnResumeSupabase.classList.toggle("hidden", !state.visible);
+  dom.btnResumeSupabase.disabled = state.disabled;
+  dom.btnResumeSupabase.setAttribute("aria-busy", state.loading ? "true" : "false");
+  dom.resumeSupabaseSpinner?.classList.toggle("hidden", !state.loading);
+  if (dom.resumeSupabaseLabel) {
+    dom.resumeSupabaseLabel.textContent = state.label;
+  }
 }
 
 function definirEtatBase(state, detail = "") {
@@ -414,36 +422,22 @@ function definirEtatBase(state, detail = "") {
       button.disabled = locked;
     }
   });
-  if (dom.btnCreerBackup) {
-    dom.btnCreerBackup.disabled = locked;
-  }
-  if (dom.listeBackups) {
-    dom.listeBackups.inert = locked;
-  }
-
   const status = {
     [DATABASE_STATES.CHECKING]: ["Vérification de la base…", "checking"],
     [DATABASE_STATES.AVAILABLE]: ["Base connectée", "available"],
     [DATABASE_STATES.UNAVAILABLE]: ["Base indisponible", "unavailable"],
     [DATABASE_STATES.SUPABASE_PAUSED]: ["Supabase en pause", "paused"],
-    [DATABASE_STATES.RESTORING]: ["Reprise en cours…", "restoring"],
+    [DATABASE_STATES.RESTORING]: ["Réactivation en cours…", "restoring"],
     [DATABASE_STATES.CONFLICT]: ["Conflit de version", "conflict"],
   }[state] || ["État inconnu", "unavailable"];
   afficherStatutBase(status[0], status[1]);
 
-  if (dom.supabasePausedPanel) {
-    dom.supabasePausedPanel.classList.toggle("hidden", state !== DATABASE_STATES.SUPABASE_PAUSED);
+  if (state === DATABASE_STATES.SUPABASE_PAUSED && detail) {
+    dom.databaseStatus?.setAttribute("title", detail);
+  } else {
+    dom.databaseStatus?.removeAttribute("title");
   }
-  if (dom.supabasePausedMessage && detail) {
-    dom.supabasePausedMessage.textContent = detail;
-  }
-  if (dom.btnResumeSupabase) {
-    dom.btnResumeSupabase.disabled = state === DATABASE_STATES.RESTORING;
-  }
-}
-
-function attendre(delay) {
-  return new Promise((resolve) => window.setTimeout(resolve, delay));
+  mettreAJourBoutonReactivationSupabase();
 }
 
 function ouvrirModal(modal) {
@@ -554,10 +548,6 @@ async function importerPdf(file) {
     dom.statutImport.textContent = "Apercu pret.";
     setEtapeImport("preview");
   } catch (error) {
-    if (error?.status === 401 && error?.code === "authentication_required") {
-      window.location.assign("/login");
-      return;
-    }
     dom.statutImport.textContent = error.message || "Import impossible.";
     afficherToast(error.message || "Import impossible.", "danger");
   }
@@ -934,9 +924,6 @@ async function exporterDepuisModal() {
 
     if (!response.ok) {
       const err = await response.json().catch(() => ({}));
-      if (redirigerSiSessionExpiree(response, err)) {
-        return;
-      }
       throw new Error(err.error || "Echec export.");
     }
 
@@ -1020,9 +1007,6 @@ async function genererLienPartage() {
     });
 
     const data = await response.json().catch(() => ({}));
-    if (redirigerSiSessionExpiree(response, data)) {
-      return;
-    }
     if (!response.ok) {
       throw new Error(data.error || "Impossible de generer le lien.");
     }
@@ -1143,9 +1127,6 @@ async function sauvegarderWorkspace() {
       body: JSON.stringify(payload),
     });
     const data = await response.json().catch(() => ({}));
-    if (redirigerSiSessionExpiree(response, data)) {
-      return;
-    }
 
     if (!response.ok || data?.error) {
       const error = new Error(data.message || data.error || "Echec de sauvegarde.");
@@ -1181,7 +1162,7 @@ async function sauvegarderWorkspace() {
         conflict
           ? "Le workspace a changé ailleurs. Recharge la page avant de continuer."
           : paused
-            ? "Le projet Supabase est en pause. Aucune écriture ne sera envoyée."
+            ? "Supabase est en pause. Utilise le bouton de réactivation."
           : "Sauvegarde automatique indisponible. Recharge la page plus tard.",
         "warning",
       );
@@ -1198,22 +1179,19 @@ async function sauvegarderWorkspace() {
   }
 }
 
-async function chargerWorkspacePersistant({ silencieux = false, recoveryInProgress = false } = {}) {
+async function chargerWorkspacePersistant({ silencieux = false, repriseEnCours = false } = {}) {
   annulerSauvegardesPlanifiees();
   workspaceLoadState = WORKSPACE_LOAD_STATES.LOADING;
   workspaceInitialLoadCompleted = false;
   workspaceStorageAvailable = false;
   workspaceStateSuspect = false;
-  definirEtatBase(DATABASE_STATES.CHECKING);
+  definirEtatBase(repriseEnCours ? DATABASE_STATES.RESTORING : DATABASE_STATES.CHECKING);
 
   let schemaModifie = false;
   let signatureServeur = "";
   try {
     const response = await fetch("/api/workspace", { method: "GET", headers: { Accept: "application/json" } });
     const data = await response.json().catch(() => ({}));
-    if (redirigerSiSessionExpiree(response, data)) {
-      return false;
-    }
 
     const loadErrorCode = getWorkspaceLoadErrorCode(response.ok, data);
     if (loadErrorCode) {
@@ -1273,7 +1251,7 @@ async function chargerWorkspacePersistant({ silencieux = false, recoveryInProgre
     const paused = error?.code === "supabase_paused";
     bloquerPersistanceWorkspace(
       WORKSPACE_LOAD_STATES.STORAGE_UNAVAILABLE,
-      recoveryInProgress
+      repriseEnCours
         ? DATABASE_STATES.RESTORING
         : paused
           ? DATABASE_STATES.SUPABASE_PAUSED
@@ -1283,7 +1261,7 @@ async function chargerWorkspacePersistant({ silencieux = false, recoveryInProgre
     if (!silencieux) {
       afficherToast(
         paused
-          ? "Le projet Supabase est en pause. Aucune sauvegarde ne sera envoyée."
+          ? "Supabase est en pause. Utilise le bouton de réactivation."
           : "Base temporairement indisponible : aucune sauvegarde ne sera envoyée. Recharge la page plus tard.",
         "warning",
       );
@@ -1299,153 +1277,52 @@ async function chargerWorkspacePersistant({ silencieux = false, recoveryInProgre
   return true;
 }
 
-function afficherBackups(backups) {
-  if (!dom.listeBackups) {
-    return;
-  }
-  if (!Array.isArray(backups) || backups.length === 0) {
-    dom.listeBackups.innerHTML = '<p class="texte-discret">Aucun backup disponible.</p>';
-    return;
-  }
-  dom.listeBackups.innerHTML = backups
-    .map((backup) => {
-      const date = new Date(backup.created_at);
-      const dateLabel = Number.isNaN(date.getTime()) ? texte(backup.created_at) : date.toLocaleString("fr-FR");
-      return `
-        <div class="backup-row">
-          <div class="backup-meta">
-            <strong>#${Number(backup.id)} · ${echapperHtml(backup.reason || "backup")}</strong>
-            <span class="texte-discret">${echapperHtml(dateLabel)} · ${Number(backup.row_count) || 0} lignes</span>
-          </div>
-          <button class="btn-secondaire petit" type="button" data-restore-backup="${Number(backup.id)}">Restaurer</button>
-        </div>`;
-    })
-    .join("");
-}
-
-async function chargerBackups() {
-  if (!utilisateurAdmin || !dom.listeBackups) {
-    return;
-  }
-  try {
-    const response = await fetch("/api/admin/backups", { headers: { Accept: "application/json" } });
-    const data = await response.json().catch(() => ({}));
-    if (redirigerSiSessionExpiree(response, data)) {
-      return;
-    }
-    if (!response.ok) {
-      throw new Error(data.error || "Liste des backups indisponible.");
-    }
-    afficherBackups(data.backups);
-  } catch (error) {
-    dom.listeBackups.innerHTML = `<p class="texte-discret">${echapperHtml(error.message)}</p>`;
-  }
-}
-
-async function creerBackupManuel() {
-  if (databaseState !== DATABASE_STATES.AVAILABLE) {
-    afficherToast("La base doit être connectée pour créer un backup.", "warning");
-    return;
-  }
-  dom.btnCreerBackup.disabled = true;
-  try {
-    const response = await fetch("/api/admin/backups", {
-      method: "POST",
-      headers: jsonHeaders(),
-      body: "{}",
-    });
-    const data = await response.json().catch(() => ({}));
-    if (redirigerSiSessionExpiree(response, data)) {
-      return;
-    }
-    if (!response.ok) {
-      throw new Error(data.error || "Création du backup impossible.");
-    }
-    afficherToast("Backup créé.", "success");
-    await chargerBackups();
-  } catch (error) {
-    afficherToast(error.message || "Création du backup impossible.", "danger");
-  } finally {
-    dom.btnCreerBackup.disabled = databaseState !== DATABASE_STATES.AVAILABLE;
-  }
-}
-
-async function restaurerBackup(backupId) {
-  if (!window.confirm(`Restaurer le backup #${backupId} ? Le workspace actuel sera d'abord sauvegardé.`)) {
-    return;
-  }
-
-  bloquerPersistanceWorkspace(WORKSPACE_LOAD_STATES.LOADING, DATABASE_STATES.RESTORING);
-  workspaceInitialLoadCompleted = false;
-  try {
-    const response = await fetch(`/api/admin/backups/${backupId}/restore`, {
-      method: "POST",
-      headers: jsonHeaders(),
-      body: JSON.stringify({ confirm: "RESTORE" }),
-    });
-    const data = await response.json().catch(() => ({}));
-    if (redirigerSiSessionExpiree(response, data)) {
-      return;
-    }
-    if (!response.ok) {
-      throw new Error(data.error || "Restauration impossible.");
-    }
-
-    const reloaded = await chargerWorkspacePersistant({ silencieux: true, recoveryInProgress: true });
-    if (!reloaded) {
-      throw new Error("Backup restauré, mais le workspace n'a pas pu être rechargé.");
-    }
-    afficherToast("Backup restauré et workspace rechargé.", "success");
-    await chargerBackups();
-  } catch (error) {
-    bloquerPersistanceWorkspace(WORKSPACE_LOAD_STATES.STORAGE_UNAVAILABLE, DATABASE_STATES.UNAVAILABLE);
-    afficherToast(error.message || "Restauration impossible.", "danger");
-  }
-}
-
-async function attendreRepriseSupabase() {
+async function attendreReactivationSupabase() {
   for (let attempt = 0; attempt < 30; attempt += 1) {
     await attendre(attempt === 0 ? 2500 : 5000);
-    const action = recoveryActionAfterProbe(DATABASE_STATES.RESTORING, true);
-    if (action.action !== "reload_workspace") {
-      continue;
-    }
-    const loaded = await chargerWorkspacePersistant({ silencieux: true, recoveryInProgress: true });
+    const loaded = await chargerWorkspacePersistant({ silencieux: true, repriseEnCours: true });
     if (loaded) {
-      afficherToast("Supabase est de nouveau disponible. Workspace rechargé.", "success");
-      await chargerBackups();
       return true;
     }
-    definirEtatBase(DATABASE_STATES.RESTORING);
   }
-  bloquerPersistanceWorkspace(WORKSPACE_LOAD_STATES.STORAGE_UNAVAILABLE, DATABASE_STATES.UNAVAILABLE);
-  afficherToast("La reprise prend plus de temps que prévu. Réessaie plus tard.", "warning");
   return false;
 }
 
 async function reprendreSupabase() {
-  if (!window.confirm("Demander la reprise du projet Supabase ? Les écritures resteront bloquées jusqu'au rechargement.")) {
+  if (reactivationSupabaseEnCours || databaseState !== DATABASE_STATES.SUPABASE_PAUSED) {
     return;
   }
-  bloquerPersistanceWorkspace(WORKSPACE_LOAD_STATES.LOADING, DATABASE_STATES.RESTORING);
+
+  reactivationSupabaseEnCours = true;
   workspaceInitialLoadCompleted = false;
+  bloquerPersistanceWorkspace(WORKSPACE_LOAD_STATES.LOADING, DATABASE_STATES.RESTORING);
+
   try {
-    const response = await fetch("/api/admin/supabase/resume", {
+    const response = await fetch("/api/system/supabase/resume", {
       method: "POST",
       headers: jsonHeaders(),
       body: "{}",
     });
     const data = await response.json().catch(() => ({}));
-    if (redirigerSiSessionExpiree(response, data)) {
-      return;
-    }
     if (!response.ok && data.error !== "supabase_project_already_active") {
-      throw new Error(data.message || data.error || "La reprise Supabase a échoué.");
+      throw new Error(data.message || data.error || "La réactivation Supabase a échoué.");
     }
-    await attendreRepriseSupabase();
+
+    const reconnected = await attendreReactivationSupabase();
+    if (!reconnected) {
+      throw new Error("La réactivation prend plus de temps que prévu. Réessaie dans quelques minutes.");
+    }
+
+    reactivationSupabaseEnCours = false;
+    mettreAJourBoutonReactivationSupabase();
+    afficherToast("Supabase reconnecté", "success");
   } catch (error) {
-    bloquerPersistanceWorkspace(WORKSPACE_LOAD_STATES.STORAGE_UNAVAILABLE, DATABASE_STATES.SUPABASE_PAUSED);
-    afficherToast(error.message || "La reprise Supabase a échoué.", "danger");
+    reactivationSupabaseEnCours = false;
+    bloquerPersistanceWorkspace(
+      WORKSPACE_LOAD_STATES.STORAGE_UNAVAILABLE,
+      DATABASE_STATES.SUPABASE_PAUSED,
+    );
+    afficherToast(error.message || "La réactivation Supabase a échoué.", "danger");
   }
 }
 
@@ -1490,14 +1367,6 @@ function renderInterface() {
 
 function bindEvents() {
   dom.btnResumeSupabase?.addEventListener("click", reprendreSupabase);
-  dom.btnCreerBackup?.addEventListener("click", creerBackupManuel);
-  dom.listeBackups?.addEventListener("click", (event) => {
-    const button = event.target.closest("button[data-restore-backup]");
-    const backupId = Number(button?.dataset.restoreBackup);
-    if (Number.isInteger(backupId) && backupId > 0) {
-      restaurerBackup(backupId);
-    }
-  });
 
   [dom.btnImporterHaut, dom.btnImporterVide].forEach((btn) => {
     btn?.addEventListener("click", ouvrirImport);
@@ -1708,9 +1577,6 @@ async function init() {
   renderInterface();
   await chargerWorkspacePersistant();
   bindEvents();
-  if (utilisateurAdmin) {
-    await chargerBackups();
-  }
   renderInterface();
 }
 

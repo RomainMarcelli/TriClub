@@ -47,64 +47,96 @@ def save(client, snapshot, expected_exists, revision=None, empty_intent=None):
     )
 
 
-def promote_to_admin(client):
-    with client.session_transaction() as auth_session:
-        auth_session["role"] = "admin"
+def make_public_client(app_module):
+    public_client = app_module.app.test_client()
+    assert public_client.get("/").status_code == 200
+    with public_client.session_transaction() as browser_session:
+        csrf = browser_session["csrf_token"]
 
-
-def make_authenticated_client(app_module, password="test-user-password"):
-    auth_client = app_module.app.test_client()
-    auth_client.get("/login")
-    with auth_client.session_transaction() as login_session:
-        login_csrf = login_session["csrf_token"]
-    response = auth_client.post(
-        "/login",
-        data={"password": password, "csrf_token": login_csrf},
-    )
-    assert response.status_code == 302
-
-    with auth_client.session_transaction() as auth_session:
-        request_csrf = auth_session["csrf_token"]
-    original_open = auth_client.open
+    original_open = public_client.open
 
     def open_with_csrf(*args, **kwargs):
         method = str(kwargs.get("method", "GET")).upper()
         if method in {"POST", "PUT", "PATCH", "DELETE"}:
             headers = dict(kwargs.get("headers") or {})
-            headers.setdefault("X-CSRF-Token", request_csrf)
+            headers.setdefault("X-CSRF-Token", csrf)
             kwargs["headers"] = headers
         return original_open(*args, **kwargs)
 
-    auth_client.open = open_with_csrf
-    return auth_client
+    public_client.open = open_with_csrf
+    return public_client
 
 
-def test_pages_and_admin_api_require_the_expected_role(client):
+def test_application_and_workspace_api_are_public(client):
     app_module = sys.modules["app"]
     anonymous = app_module.app.test_client()
 
-    assert anonymous.get("/").status_code == 302
-    assert anonymous.get("/api/workspace").status_code == 401
-    assert anonymous.get("/api/admin/backups").status_code == 401
-    assert client.get("/api/admin/backups").status_code == 403
+    index = anonymous.get("/")
+    assert index.status_code == 200
+    assert b"Ben Workspace" in index.data
+    assert b"D\xc3\xa9connexion" not in index.data
+    assert b'id="btnResumeSupabase"' in index.data
+    assert b"btn-resume-supabase hidden" in index.data
+    assert anonymous.get("/login").status_code == 404
+
+    loaded = anonymous.get("/api/workspace")
+    assert loaded.status_code == 200
+    assert loaded.get_json()["exists"] is False
+    assert loaded.get_json()["csrf_token"]
 
 
-def test_admin_password_creates_an_admin_session(client):
-    app_module = sys.modules["app"]
-    login_client = app_module.app.test_client()
-    login_client.get("/login")
-    with login_client.session_transaction() as login_session:
-        csrf = login_session["csrf_token"]
-    response = login_client.post(
-        "/login",
-        data={"password": "test-admin-password", "csrf_token": csrf},
+def test_public_business_routes_do_not_require_login(client):
+    exported = client.post(
+        "/api/export",
+        json={
+            "filename": "public",
+            "columns": workspace()["columns"],
+            "rows": workspace()["rows"],
+        },
     )
-    assert response.status_code == 302
-    with login_client.session_transaction() as login_session:
-        assert login_session["role"] == "admin"
+    assert exported.status_code == 200
+
+    shared = client.post(
+        "/api/share",
+        json={"workspace": workspace()},
+    )
+    assert shared.status_code == 200
+
+    missing_pdf = client.post("/api/extract", data={})
+    assert missing_pdf.status_code == 400
 
 
-def test_csrf_is_required_on_authenticated_writes(client):
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("GET", "/api/admin/backups"),
+        ("POST", "/api/admin/backups"),
+        ("POST", "/api/admin/backups/1/restore"),
+        ("POST", "/api/admin/supabase/resume"),
+    ],
+)
+def test_dangerous_admin_routes_are_not_exposed(client, method, path):
+    assert client.open(path, method=method, json={}).status_code == 404
+
+
+def test_anonymous_csrf_protects_writes_and_supports_beacon_json(client):
+    app_module = sys.modules["app"]
+    raw_client = app_module.app.test_client()
+    loaded = raw_client.get("/api/workspace")
+    assert loaded.status_code == 200
+    csrf_token = loaded.get_json()["csrf_token"]
+
+    payload = {"workspace": workspace(), "persistence": persistence(False)}
+    missing = raw_client.post("/api/workspace", json=payload)
+    assert missing.status_code == 403
+
+    payload["csrfToken"] = csrf_token
+    accepted = raw_client.post("/api/workspace", json=payload)
+    assert accepted.status_code == 200
+    assert accepted.get_json()["revision"]
+
+
+def test_wrong_anonymous_csrf_is_rejected(client):
     response = client.post(
         "/api/workspace",
         json={"workspace": workspace(), "persistence": persistence(False)},
@@ -114,138 +146,84 @@ def test_csrf_is_required_on_authenticated_writes(client):
     assert response.get_json()["error"] == "csrf_failed"
 
 
-def test_missing_csrf_is_rejected_but_beacon_json_token_is_supported(client):
+def test_server_secrets_are_never_rendered_or_returned(client, monkeypatch):
     app_module = sys.modules["app"]
-    raw_client = app_module.app.test_client()
-    with raw_client.session_transaction() as raw_session:
-        raw_session["role"] = "user"
-        raw_session["csrf_token"] = "beacon-csrf-token"
-        raw_session["workspace_read_verified"] = False
-    assert raw_client.get("/api/workspace").status_code == 200
-
-    payload = {"workspace": workspace(), "persistence": persistence(False)}
-    missing = raw_client.post("/api/workspace", json=payload)
-    assert missing.status_code == 403
-
-    payload["csrfToken"] = "beacon-csrf-token"
-    accepted = raw_client.post("/api/workspace", json=payload)
-    assert accepted.status_code == 200
-
-
-def test_secrets_are_never_rendered_or_returned(client, monkeypatch):
-    app_module = sys.modules["app"]
-    management_secret = "management-token-must-stay-server-side"
     service_secret = "service-role-key-must-stay-server-side"
-    monkeypatch.setattr(app_module, "SUPABASE_MANAGEMENT_TOKEN", management_secret)
+    management_secret = "management-token-must-stay-server-side"
+    project_ref = "project-ref-must-stay-server-side"
     monkeypatch.setattr(app_module, "SUPABASE_SERVICE_ROLE_KEY", service_secret)
+    monkeypatch.setattr(app_module, "SUPABASE_MANAGEMENT_TOKEN", management_secret)
+    monkeypatch.setattr(app_module, "SUPABASE_PROJECT_REF", project_ref)
 
     page = client.get("/").data.decode("utf-8")
     api_body = client.get("/api/workspace").data.decode("utf-8")
-    assert management_secret not in page + api_body
     assert service_secret not in page + api_body
+    assert management_secret not in page + api_body
+    assert project_ref not in page + api_body
 
 
-def test_periodic_backup_is_throttled_and_admin_list_has_no_payload(client):
+def test_public_autosave_keeps_periodic_backups_throttled(client):
     initial = save(client, workspace("A"), False)
     revision_1 = initial.get_json()["revision"]
     updated = save(client, workspace("B"), True, revision_1)
     revision_2 = updated.get_json()["revision"]
     assert save(client, workspace("C"), True, revision_2).status_code == 200
 
-    promote_to_admin(client)
-    response = client.get("/api/admin/backups")
-    assert response.status_code == 200
-    backups = response.get_json()["backups"]
+    app_module = sys.modules["app"]
+    backups = app_module.list_workspace_backups()
     assert len(backups) == 1
     assert backups[0]["reason"] == "periodic"
     assert "payload" not in backups[0]
 
 
-def test_destructive_empty_save_creates_immediate_backup(client):
+def test_destructive_empty_save_creates_immediate_automatic_backup(client):
     initial = save(client, workspace("A"), False)
     revision = initial.get_json()["revision"]
     emptied = save(client, workspace(rows=False), True, revision, "user_deleted_all_rows")
     assert emptied.status_code == 200
 
-    promote_to_admin(client)
-    backups = client.get("/api/admin/backups").get_json()["backups"]
+    app_module = sys.modules["app"]
+    backups = app_module.list_workspace_backups()
     assert backups[0]["reason"] == "before_empty_transition"
     assert backups[0]["row_count"] == 1
 
 
-def test_backup_retention_is_bounded(client, monkeypatch):
+def test_automatic_backup_retention_is_bounded_without_public_admin_route(client, monkeypatch):
     app_module = sys.modules["app"]
     monkeypatch.setattr(app_module, "WORKSPACE_BACKUP_RETENTION_COUNT", 5)
     assert save(client, workspace("A"), False).status_code == 200
-    promote_to_admin(client)
+    record = app_module.load_workspace_record()
 
     for _ in range(7):
-        assert client.post("/api/admin/backups", json={}).status_code == 201
+        app_module.create_backup_and_prune(record, "retention_test")
 
-    backups = client.get("/api/admin/backups").get_json()["backups"]
-    assert len(backups) == 5
-
-
-def test_admin_restore_backups_current_state_and_invalidates_old_revision(client):
-    initial = save(client, workspace("A"), False)
-    revision_1 = initial.get_json()["revision"]
-    updated = save(client, workspace("B"), True, revision_1)
-    revision_2 = updated.get_json()["revision"]
-
-    promote_to_admin(client)
-    backup_id = client.get("/api/admin/backups").get_json()["backups"][0]["id"]
-    restored = client.post(
-        f"/api/admin/backups/{backup_id}/restore",
-        json={"confirm": "RESTORE"},
-    )
-    assert restored.status_code == 200
-    assert restored.get_json()["revision"] != revision_2
-
-    blocked_before_get = save(
-        client,
-        workspace("must-not-write"),
-        True,
-        restored.get_json()["revision"],
-    )
-    assert blocked_before_get.status_code == 428
-    assert blocked_before_get.get_json()["error"] == "workspace_fresh_read_required"
-
-    assert client.get("/api/workspace").get_json()["workspace"]["rows"][0]["values"]["col_name"] == "A"
-
-    stale = save(client, workspace("stale"), True, revision_2)
-    assert stale.status_code == 409
-    reasons = [item["reason"] for item in client.get("/api/admin/backups").get_json()["backups"]]
-    assert "before_admin_restore" in reasons
+    assert len(app_module.list_workspace_backups()) == 5
+    assert client.get("/api/admin/backups").status_code == 404
 
 
-def test_restore_requires_a_fresh_get_for_every_session(client):
+def test_internal_restore_requires_a_fresh_get_for_every_public_session(client):
     app_module = sys.modules["app"]
     initial = save(client, workspace("backup-version"), False)
     revision_1 = initial.get_json()["revision"]
-    promote_to_admin(client)
-    manual_backup = client.post("/api/admin/backups", json={}).get_json()["backup"]
+    backup = app_module.create_backup_and_prune(app_module.load_workspace_record(), "test_restore")
 
     updated = save(client, workspace("current-version"), True, revision_1)
     revision_before_restore = updated.get_json()["revision"]
-    assert client.get("/api/workspace").status_code == 200
-
-    client_b = make_authenticated_client(app_module)
-    loaded_b = client_b.get("/api/workspace")
-    assert loaded_b.status_code == 200
-    assert loaded_b.get_json()["revision"] == revision_before_restore
+    client_a = client
+    client_b = make_public_client(app_module)
+    assert client_a.get("/api/workspace").status_code == 200
+    assert client_b.get("/api/workspace").get_json()["revision"] == revision_before_restore
     with client_b.session_transaction() as session_b:
         epoch_b_before = session_b["workspace_read_epoch"]
     server_epoch_before = app_module.WORKSPACE_READ_EPOCH
 
-    restored = client.post(
-        f"/api/admin/backups/{manual_backup['id']}/restore",
-        json={"confirm": "RESTORE"},
-    )
-    assert restored.status_code == 200
+    restored = app_module.restore_workspace_backup(backup["id"])
+    restored_revision = restored["revision"]
+    assert restored_revision != revision_before_restore
     assert app_module.WORKSPACE_READ_EPOCH != server_epoch_before
-    loaded_a = client.get("/api/workspace")
+    loaded_a = client_a.get("/api/workspace")
     assert loaded_a.status_code == 200
-    restored_revision = loaded_a.get_json()["revision"]
+    assert loaded_a.get_json()["revision"] == restored_revision
 
     with client_b.session_transaction() as session_b:
         assert session_b["workspace_read_epoch"] == epoch_b_before
@@ -256,17 +234,112 @@ def test_restore_requires_a_fresh_get_for_every_session(client):
     refreshed_b = client_b.get("/api/workspace")
     assert refreshed_b.status_code == 200
     assert refreshed_b.get_json()["revision"] == restored_revision
-    with client_b.session_transaction() as session_b:
-        assert session_b["workspace_read_epoch"] == app_module.WORKSPACE_READ_EPOCH
     accepted_b = save(client_b, workspace("fresh-client-b"), True, restored_revision)
     assert accepted_b.status_code == 200
 
 
-def test_restore_requires_admin_and_explicit_confirmation(client):
-    assert save(client, workspace("A"), False).status_code == 200
-    assert client.post("/api/admin/backups/1/restore", json={"confirm": "RESTORE"}).status_code == 403
-    promote_to_admin(client)
-    assert client.post("/api/admin/backups/1/restore", json={}).status_code == 400
+def test_resume_route_requires_a_confirmed_supabase_pause(client, monkeypatch):
+    app_module = sys.modules["app"]
+    calls = []
+    monkeypatch.setattr(app_module, "request_supabase_project_restore", lambda: calls.append("resume"))
+
+    response = client.post("/api/system/supabase/resume", json={})
+
+    assert response.status_code == 409
+    assert response.get_json()["error"] == "supabase_pause_not_confirmed"
+    assert calls == []
+
+
+def test_resume_route_still_requires_anonymous_csrf(client, monkeypatch):
+    app_module = sys.modules["app"]
+    app_module.require_fresh_reads_after_paused_storage()
+    raw_client = app_module.app.test_client()
+    monkeypatch.setattr(app_module, "request_supabase_project_restore", lambda: None)
+
+    response = raw_client.post("/api/system/supabase/resume", json={})
+
+    assert response.status_code == 403
+    assert response.get_json()["error"] == "csrf_failed"
+
+
+def test_supabase_resume_requires_a_fresh_get_for_every_public_session(client, monkeypatch):
+    app_module = sys.modules["app"]
+    initial = save(client, workspace("before-pause"), False)
+    revision = initial.get_json()["revision"]
+    client_a = client
+    client_b = make_public_client(app_module)
+    assert client_a.get("/api/workspace").status_code == 200
+    assert client_b.get("/api/workspace").get_json()["revision"] == revision
+    with client_b.session_transaction() as session_b:
+        epoch_b_before = session_b["workspace_read_epoch"]
+    server_epoch_before = app_module.WORKSPACE_READ_EPOCH
+
+    real_load = app_module.load_workspace_record
+
+    def paused_load():
+        raise app_module.SupabaseProjectPaused("Project paused")
+
+    monkeypatch.setattr(app_module, "load_workspace_record", paused_load)
+    paused = client_a.get("/api/workspace")
+    assert paused.status_code == 503
+    assert paused.get_json()["error"] == "supabase_paused"
+    assert app_module.WORKSPACE_READ_EPOCH != server_epoch_before
+    assert app_module.supabase_pause_is_confirmed() is True
+
+    monkeypatch.setattr(app_module, "load_workspace_record", real_load)
+    calls = []
+    monkeypatch.setattr(app_module, "request_supabase_project_restore", lambda: calls.append("resume"))
+    resumed = client_a.post("/api/system/supabase/resume", json={})
+    assert resumed.status_code == 202
+    assert resumed.get_json()["status"] == "restore_requested"
+    assert calls == ["resume"]
+
+    loaded_a = client_a.get("/api/workspace")
+    assert loaded_a.status_code == 200
+    assert loaded_a.get_json()["revision"] == revision
+    assert app_module.supabase_pause_is_confirmed() is False
+
+    with client_b.session_transaction() as session_b:
+        assert session_b["workspace_read_epoch"] == epoch_b_before
+    blocked_b = save(client_b, workspace("stale-after-pause"), True, revision)
+    assert blocked_b.status_code == 428
+    assert blocked_b.get_json()["error"] == "workspace_fresh_read_required"
+
+    refreshed_b = client_b.get("/api/workspace")
+    assert refreshed_b.status_code == 200
+    assert refreshed_b.get_json()["revision"] == revision
+    accepted_b = save(client_b, workspace("fresh-after-pause"), True, revision)
+    assert accepted_b.status_code == 200
+
+
+def test_failed_supabase_resume_keeps_workspace_writes_blocked(client, monkeypatch):
+    app_module = sys.modules["app"]
+    assert save(client, workspace("before-failure"), False).status_code == 200
+
+    real_load = app_module.load_workspace_record
+    monkeypatch.setattr(
+        app_module,
+        "load_workspace_record",
+        lambda: (_ for _ in ()).throw(app_module.SupabaseProjectPaused("Project paused")),
+    )
+    assert client.get("/api/workspace").status_code == 503
+    monkeypatch.setattr(app_module, "load_workspace_record", real_load)
+
+    def fail_resume():
+        raise app_module.SupabaseManagementError(
+            "supabase_management_unavailable",
+            "Management API indisponible.",
+            503,
+        )
+
+    monkeypatch.setattr(app_module, "request_supabase_project_restore", fail_resume)
+    failed = client.post("/api/system/supabase/resume", json={})
+    assert failed.status_code == 503
+    assert failed.get_json()["error"] == "supabase_management_unavailable"
+
+    blocked = save(client, workspace("must-not-write"), True, real_load()["revision"])
+    assert blocked.status_code == 428
+    assert blocked.get_json()["error"] == "workspace_fresh_read_required"
 
 
 def test_keepalive_requires_bearer_and_performs_only_probe(client, monkeypatch):
@@ -283,6 +356,24 @@ def test_keepalive_requires_bearer_and_performs_only_probe(client, monkeypatch):
     assert response.status_code == 200
     assert response.get_json() == {"status": "ok", "database": "available"}
     assert calls == ["probe"]
+
+
+def test_keepalive_pause_detection_rotates_the_public_read_epoch(client, monkeypatch):
+    app_module = sys.modules["app"]
+    initial_epoch = app_module.WORKSPACE_READ_EPOCH
+
+    def paused_probe():
+        raise app_module.SupabaseProjectPaused("Project paused")
+
+    monkeypatch.setattr(app_module, "probe_workspace_storage", paused_probe)
+    response = app_module.app.test_client().get(
+        "/api/system/keepalive",
+        headers={"Authorization": "Bearer test-keepalive-token"},
+    )
+
+    assert response.status_code == 503
+    assert response.get_json()["error"] == "supabase_paused"
+    assert app_module.WORKSPACE_READ_EPOCH != initial_epoch
 
 
 def test_keepalive_read_does_not_mutate_workspace_or_create_backup(client):
@@ -320,19 +411,6 @@ def test_keepalive_fails_closed_when_token_is_missing(client, monkeypatch):
     assert response.get_json()["error"] == "keepalive_not_configured"
 
 
-def test_paused_supabase_has_a_distinct_api_error(client, monkeypatch):
-    app_module = sys.modules["app"]
-    monkeypatch.setattr(
-        app_module,
-        "load_workspace_record",
-        lambda: (_ for _ in ()).throw(app_module.SupabaseProjectPaused("paused")),
-    )
-    response = client.get("/api/workspace")
-    assert response.status_code == 503
-    assert response.get_json()["error"] == "supabase_paused"
-    assert app_module.supabase_error_indicates_paused(540, "") is True
-
-
 def test_supabase_rest_http_540_becomes_paused_signal(client, monkeypatch):
     app_module = sys.modules["app"]
     monkeypatch.setattr(app_module, "HAS_SUPABASE_REST", True)
@@ -353,55 +431,7 @@ def test_supabase_rest_http_540_becomes_paused_signal(client, monkeypatch):
         app_module.supabase_rest_request("GET", "workspace_state?select=id")
 
 
-def test_admin_resume_route_uses_server_side_management_call(client, monkeypatch):
-    app_module = sys.modules["app"]
-    calls = []
-    monkeypatch.setattr(app_module, "request_supabase_project_restore", lambda: calls.append("restore"))
-    assert client.post("/api/admin/supabase/resume", json={}).status_code == 403
-
-    promote_to_admin(client)
-    response = client.post("/api/admin/supabase/resume", json={})
-    assert response.status_code == 200
-    assert calls == ["restore"]
-
-
-def test_resume_requires_a_fresh_get_for_every_session(client, monkeypatch):
-    app_module = sys.modules["app"]
-    initial = save(client, workspace("before-resume"), False)
-    revision = initial.get_json()["revision"]
-    assert client.get("/api/workspace").status_code == 200
-
-    client_b = make_authenticated_client(app_module)
-    loaded_b = client_b.get("/api/workspace")
-    assert loaded_b.status_code == 200
-    assert loaded_b.get_json()["revision"] == revision
-    with client_b.session_transaction() as session_b:
-        epoch_b_before = session_b["workspace_read_epoch"]
-    server_epoch_before = app_module.WORKSPACE_READ_EPOCH
-
-    promote_to_admin(client)
-    monkeypatch.setattr(app_module, "request_supabase_project_restore", lambda: None)
-    resumed = client.post("/api/admin/supabase/resume", json={})
-    assert resumed.status_code == 200
-    assert app_module.WORKSPACE_READ_EPOCH != server_epoch_before
-    assert client.get("/api/workspace").status_code == 200
-
-    with client_b.session_transaction() as session_b:
-        assert session_b["workspace_read_epoch"] == epoch_b_before
-    blocked_b = save(client_b, workspace("stale-after-resume"), True, revision)
-    assert blocked_b.status_code == 428
-    assert blocked_b.get_json()["error"] == "workspace_fresh_read_required"
-
-    refreshed_b = client_b.get("/api/workspace")
-    assert refreshed_b.status_code == 200
-    assert refreshed_b.get_json()["revision"] == revision
-    with client_b.session_transaction() as session_b:
-        assert session_b["workspace_read_epoch"] == app_module.WORKSPACE_READ_EPOCH
-    accepted_b = save(client_b, workspace("fresh-after-resume"), True, revision)
-    assert accepted_b.status_code == 200
-
-
-def test_management_restore_calls_official_endpoint_without_returning_token(client, monkeypatch):
+def test_management_restore_calls_fixed_endpoint_with_server_token(client, monkeypatch):
     app_module = sys.modules["app"]
     monkeypatch.setattr(app_module, "SUPABASE_PROJECT_REF", "project-ref")
     monkeypatch.setattr(app_module, "SUPABASE_MANAGEMENT_TOKEN", "server-only-token")
@@ -425,12 +455,13 @@ def test_management_restore_calls_official_endpoint_without_returning_token(clie
 
     monkeypatch.setattr(app_module.urllib.request, "urlopen", fake_urlopen)
     app_module.request_supabase_project_restore()
+
     assert captured["url"] == "https://api.supabase.com/v1/projects/project-ref/restore"
     assert captured["authorization"] == "Bearer server-only-token"
     assert captured["timeout"] == 15
 
 
-def test_management_restore_maps_permission_failure(client, monkeypatch):
+def test_management_restore_maps_permission_failure_without_leaking_body(client, monkeypatch):
     app_module = sys.modules["app"]
     monkeypatch.setattr(app_module, "SUPABASE_PROJECT_REF", "project-ref")
     monkeypatch.setattr(app_module, "SUPABASE_MANAGEMENT_TOKEN", "server-only-token")
@@ -441,10 +472,12 @@ def test_management_restore_maps_permission_failure(client, monkeypatch):
             403,
             "Forbidden",
             {},
-            io.BytesIO(b'{"message":"forbidden"}'),
+            io.BytesIO(b'{"message":"sensitive provider detail"}'),
         )
 
     monkeypatch.setattr(app_module.urllib.request, "urlopen", forbidden)
     with pytest.raises(app_module.SupabaseManagementError) as captured:
         app_module.request_supabase_project_restore()
+
     assert captured.value.code == "supabase_restore_refused"
+    assert "sensitive provider detail" not in str(captured.value)
