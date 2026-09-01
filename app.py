@@ -74,6 +74,7 @@ DB_PATH = os.environ.get("BEN_DB_PATH", os.path.join(os.path.dirname(__file__), 
 DB_FALLBACK_PATH = os.path.join("/tmp", "ben_workspace.db")
 DB_ACTIVE_PATH = DB_PATH
 DB_LOCK = threading.Lock()
+WORKSPACE_WRITE_LOCK = threading.Lock()
 FFR_LINE_PATTERN = re.compile(r"^(?P<ligue>.+?)\s+(?P<cd>\S+)\s+(?P<code>\d{4}[A-Za-z])\s+(?P<club>.+)$")
 FFR_IGNORE_PREFIXES = (
     "Liste des clubs inscrits",
@@ -641,69 +642,99 @@ def decode_workspace_payload(raw_payload: Any) -> dict[str, Any] | None:
     return None
 
 
-def load_workspace_state_sqlite() -> dict[str, Any] | None:
+def normalize_workspace_revision(value: Any) -> str:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return clean_cell(value)
+
+
+def build_workspace_record(raw_payload: Any, raw_revision: Any) -> dict[str, Any]:
+    data = decode_workspace_payload(raw_payload)
+    if data is None:
+        raise RuntimeError("Le workspace stocke contient un payload JSON invalide.")
+
+    workspace = sanitize_workspace_state(data)
+    if workspace is None:
+        raise RuntimeError("Le workspace stocke ne peut pas etre nettoye.")
+
+    revision = normalize_workspace_revision(raw_revision)
+    if not revision:
+        raise RuntimeError("Le workspace stocke ne contient pas de revision.")
+
+    return {"workspace": workspace, "revision": revision}
+
+
+def load_workspace_record_sqlite() -> dict[str, Any] | None:
     ensure_sqlite_database()
     set_storage_backend("sqlite")
     with DB_LOCK:
         with sqlite3.connect(DB_ACTIVE_PATH) as conn:
-            row = conn.execute("SELECT payload FROM workspace_state WHERE id = 1").fetchone()
+            row = conn.execute("SELECT payload, updated_at FROM workspace_state WHERE id = 1").fetchone()
 
     if not row:
         return None
 
-    data = decode_workspace_payload(row[0])
-    if data is None:
-        return None
-
-    return sanitize_workspace_state(data)
+    return build_workspace_record(row[0], row[1])
 
 
-def load_workspace_state_postgres() -> dict[str, Any] | None:
+def load_workspace_record_postgres() -> dict[str, Any] | None:
     ensure_postgres_database()
     set_storage_backend("postgres")
     with DB_LOCK:
         with psycopg.connect(SUPABASE_DB_URL) as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT payload FROM workspace_state WHERE id = 1")
+                cur.execute("SELECT payload, updated_at FROM workspace_state WHERE id = 1")
                 row = cur.fetchone()
 
     if not row:
         return None
 
-    data = decode_workspace_payload(row[0])
-    if data is None:
-        return None
-
-    return sanitize_workspace_state(data)
+    return build_workspace_record(row[0], row[1])
 
 
-def load_workspace_state_supabase_rest() -> dict[str, Any] | None:
+def load_workspace_record_supabase_rest() -> dict[str, Any] | None:
     ensure_supabase_rest_database()
     set_storage_backend("supabase_rest")
-    rows = supabase_rest_request("GET", "workspace_state?select=payload&id=eq.1&limit=1")
+    rows = supabase_rest_request("GET", "workspace_state?select=payload,updated_at&id=eq.1&limit=1")
     if not isinstance(rows, list) or not rows:
         return None
 
     first = rows[0] if isinstance(rows[0], dict) else {}
-    data = decode_workspace_payload(first.get("payload"))
-    if data is None:
-        return None
-
-    return sanitize_workspace_state(data)
+    return build_workspace_record(first.get("payload"), first.get("updated_at"))
 
 
-def load_workspace_state() -> dict[str, Any] | None:
+def load_workspace_record() -> dict[str, Any] | None:
     if DB_BACKEND == "postgres":
         try:
-            return load_workspace_state_postgres()
+            return load_workspace_record_postgres()
         except Exception as error:
             if not HAS_SUPABASE_REST:
                 raise
             app.logger.warning("Workspace load Postgres failed, fallback REST: %s", error)
-            return load_workspace_state_supabase_rest()
+            return load_workspace_record_supabase_rest()
     if DB_BACKEND == "supabase_rest":
-        return load_workspace_state_supabase_rest()
-    return load_workspace_state_sqlite()
+        return load_workspace_record_supabase_rest()
+    return load_workspace_record_sqlite()
+
+
+def load_workspace_state_sqlite() -> dict[str, Any] | None:
+    record = load_workspace_record_sqlite()
+    return record["workspace"] if record else None
+
+
+def load_workspace_state_postgres() -> dict[str, Any] | None:
+    record = load_workspace_record_postgres()
+    return record["workspace"] if record else None
+
+
+def load_workspace_state_supabase_rest() -> dict[str, Any] | None:
+    record = load_workspace_record_supabase_rest()
+    return record["workspace"] if record else None
+
+
+def load_workspace_state() -> dict[str, Any] | None:
+    record = load_workspace_record()
+    return record["workspace"] if record else None
 
 
 def save_workspace_state_sqlite(workspace: dict[str, Any]) -> str:
@@ -792,6 +823,46 @@ def save_workspace_state(workspace: dict[str, Any]) -> str:
     if DB_BACKEND == "supabase_rest":
         return save_workspace_state_supabase_rest(workspace)
     return save_workspace_state_sqlite(workspace)
+
+
+class WorkspaceWriteConflict(RuntimeError):
+    pass
+
+
+class UnsafeEmptyWorkspaceTransition(RuntimeError):
+    pass
+
+
+def save_workspace_state_conditionally(
+    workspace: dict[str, Any],
+    *,
+    expected_exists: bool,
+    base_revision: str,
+    empty_rows_intent: str,
+) -> str:
+    """Reject stale writes and accidental transitions to an empty workspace."""
+    with WORKSPACE_WRITE_LOCK:
+        current_record = load_workspace_record()
+        current_exists = current_record is not None
+
+        if current_exists != expected_exists:
+            raise WorkspaceWriteConflict("L'existence du workspace distant a change.")
+
+        if current_record:
+            current_revision = current_record["revision"]
+            if not base_revision or base_revision != current_revision:
+                raise WorkspaceWriteConflict("La revision du workspace distant a change.")
+        elif base_revision:
+            raise WorkspaceWriteConflict("Une revision a ete fournie pour un workspace inexistant.")
+
+        current_row_count = len(current_record["workspace"].get("rows", [])) if current_record else 0
+        next_row_count = len(workspace.get("rows", []))
+        if current_row_count > 0 and next_row_count == 0 and empty_rows_intent != "user_deleted_all_rows":
+            raise UnsafeEmptyWorkspaceTransition(
+                "Le passage d'un workspace non vide a zero ligne exige une suppression utilisateur explicite."
+            )
+
+        return save_workspace_state(workspace)
 
 
 @app.get("/")
@@ -943,7 +1014,7 @@ def api_share():
 @app.get("/api/workspace")
 def api_workspace_get():
     try:
-        workspace = load_workspace_state()
+        record = load_workspace_record()
     except Exception as error:
         app.logger.exception("Workspace load failed: %s", error)
         return (
@@ -951,17 +1022,17 @@ def api_workspace_get():
                 {
                     "workspace": None,
                     "exists": False,
-                    "warning": "workspace_storage_unavailable",
+                    "error": "workspace_storage_unavailable",
                     "storage_backend": get_storage_backend(),
                     "preferred_storage_backend": DB_BACKEND,
                     "hint": "Verifie SUPABASE_DB_URL ou SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY et la connectivite.",
                     "detail": clean_cell(str(error))[:260],
                 }
             ),
-            200,
+            503,
         )
 
-    if workspace is None:
+    if record is None:
         return jsonify(
             {
                 "workspace": None,
@@ -972,8 +1043,9 @@ def api_workspace_get():
         )
 
     response = {
-        "workspace": workspace,
+        "workspace": record["workspace"],
         "exists": True,
+        "revision": record["revision"],
         "storage_backend": get_storage_backend(),
         "preferred_storage_backend": DB_BACKEND,
     }
@@ -989,14 +1061,64 @@ def api_workspace_post():
     if workspace is None:
         return jsonify({"error": "Payload workspace invalide."}), 400
 
+    if not workspace.get("columns"):
+        return jsonify({"error": "workspace_without_columns", "message": "Un workspace sans colonne est refuse."}), 400
+
+    persistence = data.get("persistence")
+    if not isinstance(persistence, dict) or persistence.get("initialLoadCompleted") is not True:
+        return (
+            jsonify(
+                {
+                    "error": "workspace_initial_load_required",
+                    "message": "Charge le workspace distant avant toute sauvegarde.",
+                }
+            ),
+            428,
+        )
+
+    expected_exists = persistence.get("expectedExists")
+    if not isinstance(expected_exists, bool):
+        return jsonify({"error": "workspace_persistence_metadata_invalid"}), 400
+
+    base_revision = clean_cell(persistence.get("baseRevision", ""))
+    empty_rows_intent = clean_cell(persistence.get("emptyRowsIntent", ""))
+
     try:
-        updated_at = save_workspace_state(workspace)
+        updated_at = save_workspace_state_conditionally(
+            workspace,
+            expected_exists=expected_exists,
+            base_revision=base_revision,
+            empty_rows_intent=empty_rows_intent,
+        )
+    except WorkspaceWriteConflict as error:
+        app.logger.warning("Workspace save conflict: %s", error)
+        return (
+            jsonify(
+                {
+                    "error": "workspace_conflict",
+                    "message": "Le workspace distant a change. Recharge la page avant de sauvegarder.",
+                }
+            ),
+            409,
+        )
+    except UnsafeEmptyWorkspaceTransition as error:
+        app.logger.warning("Unsafe empty workspace save rejected: %s", error)
+        return (
+            jsonify(
+                {
+                    "error": "workspace_empty_transition_requires_confirmation",
+                    "message": str(error),
+                }
+            ),
+            409,
+        )
     except Exception as error:
         app.logger.exception("Workspace save failed: %s", error)
         return (
             jsonify(
                 {
-                    "error": "Sauvegarde indisponible (BDD inaccessible). Verifie la config Supabase.",
+                    "error": "workspace_storage_unavailable",
+                    "message": "Sauvegarde indisponible (BDD inaccessible). Verifie la config Supabase.",
                     "detail": clean_cell(str(error))[:260],
                     "storage_backend": get_storage_backend(),
                     "preferred_storage_backend": DB_BACKEND,
@@ -1005,7 +1127,7 @@ def api_workspace_post():
             503,
         )
 
-    return jsonify({"status": "saved", "updated_at": updated_at})
+    return jsonify({"status": "saved", "updated_at": updated_at, "revision": updated_at})
 
 
 @app.get("/api/health")

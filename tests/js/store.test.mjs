@@ -124,6 +124,21 @@ test("deleteRow supprime une ligne par id", () => {
   assert.equal(store.state.rows.find((r) => r.id === row.id), undefined);
 });
 
+test("deleteRow signale explicitement la suppression de la dernière ligne", () => {
+  const events = [];
+  const store = new WorkspaceStore((event) => events.push(event));
+  store.ensureProspectionSchema();
+  const row = store.addRow();
+  events.length = 0;
+
+  store.deleteRow(row.id);
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].reason, "deleteRow");
+  assert.equal(events[0].previousRowCount, 1);
+  assert.equal(events[0].rowCount, 0);
+});
+
 test("setFilters ne garde que les filtres avec columnId", () => {
   const store = makeStore();
   store.ensureProspectionSchema();

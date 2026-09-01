@@ -127,14 +127,14 @@ export class WorkspaceStore {
     };
   }
 
-  emit(reason = "update") {
-    this.onChange({ reason, state: this.state });
+  emit(reason = "update", details = {}) {
+    this.onChange({ reason, state: this.state, ...details });
   }
 
-  bumpData(reason) {
+  bumpData(reason, details = {}) {
     this.dataVersion += 1;
     this.cache.key = "";
-    this.emit(reason);
+    this.emit(reason, details);
   }
 
   bumpView(reason) {
@@ -449,6 +449,7 @@ export class WorkspaceStore {
   }
 
   deleteRow(rowId) {
+    const previousRowCount = this.state.rows.length;
     const next = this.state.rows.filter((row) => row.id !== rowId);
     if (next.length === this.state.rows.length) {
       return;
@@ -457,7 +458,7 @@ export class WorkspaceStore {
     if (this.state.selectedRowId === rowId) {
       this.state.selectedRowId = null;
     }
-    this.bumpData("deleteRow");
+    this.bumpData("deleteRow", { previousRowCount, rowCount: this.state.rows.length });
   }
 
   ensureProspectionSchema() {

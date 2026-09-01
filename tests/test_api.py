@@ -1,5 +1,38 @@
 import io
 import json
+import sqlite3
+import sys
+
+
+def persistence_metadata(*, expected_exists, base_revision=None, empty_rows_intent=None):
+    return {
+        "initialLoadCompleted": True,
+        "expectedExists": expected_exists,
+        "baseRevision": base_revision,
+        "emptyRowsIntent": empty_rows_intent,
+    }
+
+
+def basic_workspace(rows=None):
+    return {
+        "columns": [
+            {
+                "id": "col_role",
+                "name": "Rôle",
+                "type": "dropdown",
+                "width": 170,
+                "hidden": False,
+                "defaultValue": "aucune des catégories",
+                "options": ["président", "coach", "aucune des catégories"],
+            },
+        ],
+        "rows": rows if rows is not None else [],
+        "filters": [],
+        "searchQuery": "",
+        "sort": None,
+        "views": [],
+        "activeViewId": "",
+    }
 
 
 def test_index_serves_main_page(client):
@@ -30,28 +63,13 @@ def test_workspace_get_when_empty(client):
 
 def test_workspace_post_then_get_roundtrip(client):
     payload = {
-        "workspace": {
-            "columns": [
-                {
-                    "id": "col_role",
-                    "name": "Rôle",
-                    "type": "dropdown",
-                    "width": 170,
-                    "hidden": False,
-                    "defaultValue": "aucune des catégories",
-                    "options": ["président", "coach", "aucune des catégories"],
-                },
-            ],
-            "rows": [
+        "workspace": basic_workspace(
+            [
                 {"id": "r1", "values": {"col_role": "coach"}},
                 {"id": "r2", "values": {"col_role": "aucune des catégories"}},
-            ],
-            "filters": [],
-            "searchQuery": "",
-            "sort": None,
-            "views": [],
-            "activeViewId": "",
-        }
+            ]
+        ),
+        "persistence": persistence_metadata(expected_exists=False),
     }
     response = client.post("/api/workspace", json=payload)
     assert response.status_code == 200, response.get_json()
@@ -61,6 +79,7 @@ def test_workspace_post_then_get_roundtrip(client):
     response = client.get("/api/workspace")
     data = response.get_json()
     assert data["exists"] is True
+    assert data["revision"]
     assert data["workspace"]["columns"][0]["id"] == "col_role"
     assert data["workspace"]["rows"][0]["values"]["col_role"] == "coach"
 
@@ -68,6 +87,190 @@ def test_workspace_post_then_get_roundtrip(client):
 def test_workspace_post_rejects_invalid_payload(client):
     response = client.post("/api/workspace", json={"workspace": "not a dict"})
     assert response.status_code == 400
+
+
+def test_workspace_get_storage_failure_returns_503(client, monkeypatch):
+    app_module = sys.modules["app"]
+
+    def fail_load():
+        raise RuntimeError("Supabase paused")
+
+    monkeypatch.setattr(app_module, "load_workspace_record", fail_load)
+    response = client.get("/api/workspace")
+
+    assert response.status_code == 503
+    data = response.get_json()
+    assert data["workspace"] is None
+    assert data["exists"] is False
+    assert data["error"] == "workspace_storage_unavailable"
+
+
+def test_workspace_get_corrupt_payload_is_not_reported_as_absent(client):
+    app_module = sys.modules["app"]
+    with sqlite3.connect(app_module.DB_ACTIVE_PATH) as connection:
+        connection.execute(
+            "INSERT INTO workspace_state (id, payload, updated_at) VALUES (1, ?, ?)",
+            ("not-json", "2026-09-01T10:00:00+00:00"),
+        )
+        connection.commit()
+
+    response = client.get("/api/workspace")
+    assert response.status_code == 503
+    assert response.get_json()["error"] == "workspace_storage_unavailable"
+
+
+def test_workspace_storage_recovery_preserves_existing_rows(client, monkeypatch):
+    initial = client.post(
+        "/api/workspace",
+        json={
+            "workspace": basic_workspace([{"id": "r1", "values": {"col_role": "coach"}}]),
+            "persistence": persistence_metadata(expected_exists=False),
+        },
+    )
+    assert initial.status_code == 200
+
+    app_module = sys.modules["app"]
+    real_load = app_module.load_workspace_record
+
+    def fail_load():
+        raise RuntimeError("Supabase paused")
+
+    monkeypatch.setattr(app_module, "load_workspace_record", fail_load)
+    assert client.get("/api/workspace").status_code == 503
+
+    monkeypatch.setattr(app_module, "load_workspace_record", real_load)
+    recovered = client.get("/api/workspace")
+    assert recovered.status_code == 200
+    assert recovered.get_json()["workspace"]["rows"][0]["id"] == "r1"
+
+
+def test_workspace_post_requires_valid_initial_load_metadata(client):
+    response = client.post("/api/workspace", json={"workspace": basic_workspace()})
+    assert response.status_code == 428
+    assert response.get_json()["error"] == "workspace_initial_load_required"
+
+
+def test_workspace_roundtrip_with_1498_rows(client):
+    rows = [{"id": f"r{index}", "values": {"col_role": "coach"}} for index in range(1498)]
+    response = client.post(
+        "/api/workspace",
+        json={
+            "workspace": basic_workspace(rows),
+            "persistence": persistence_metadata(expected_exists=False),
+        },
+    )
+    assert response.status_code == 200
+
+    response = client.get("/api/workspace")
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["exists"] is True
+    assert len(data["workspace"]["rows"]) == 1498
+    assert data["revision"]
+
+
+def test_workspace_post_rejects_stale_revision(client):
+    initial = client.post(
+        "/api/workspace",
+        json={
+            "workspace": basic_workspace([{"id": "r1", "values": {"col_role": "coach"}}]),
+            "persistence": persistence_metadata(expected_exists=False),
+        },
+    )
+    revision_1 = initial.get_json()["revision"]
+
+    updated = client.post(
+        "/api/workspace",
+        json={
+            "workspace": basic_workspace([{"id": "r1", "values": {"col_role": "président"}}]),
+            "persistence": persistence_metadata(expected_exists=True, base_revision=revision_1),
+        },
+    )
+    assert updated.status_code == 200
+
+    stale = client.post(
+        "/api/workspace",
+        json={
+            "workspace": basic_workspace([{"id": "r1", "values": {"col_role": "coach"}}]),
+            "persistence": persistence_metadata(expected_exists=True, base_revision=revision_1),
+        },
+    )
+    assert stale.status_code == 409
+    assert stale.get_json()["error"] == "workspace_conflict"
+
+
+def test_workspace_non_empty_row_deletion_is_allowed(client):
+    initial = client.post(
+        "/api/workspace",
+        json={
+            "workspace": basic_workspace(
+                [
+                    {"id": "r1", "values": {"col_role": "coach"}},
+                    {"id": "r2", "values": {"col_role": "président"}},
+                ]
+            ),
+            "persistence": persistence_metadata(expected_exists=False),
+        },
+    )
+    revision = initial.get_json()["revision"]
+
+    deleted = client.post(
+        "/api/workspace",
+        json={
+            "workspace": basic_workspace([{"id": "r2", "values": {"col_role": "président"}}]),
+            "persistence": persistence_metadata(expected_exists=True, base_revision=revision),
+        },
+    )
+    assert deleted.status_code == 200
+    assert [row["id"] for row in client.get("/api/workspace").get_json()["workspace"]["rows"]] == ["r2"]
+
+
+def test_workspace_empty_transition_requires_explicit_user_intent(client):
+    initial = client.post(
+        "/api/workspace",
+        json={
+            "workspace": basic_workspace([{"id": "r1", "values": {"col_role": "coach"}}]),
+            "persistence": persistence_metadata(expected_exists=False),
+        },
+    )
+    revision = initial.get_json()["revision"]
+
+    rejected = client.post(
+        "/api/workspace",
+        json={
+            "workspace": basic_workspace([]),
+            "persistence": persistence_metadata(expected_exists=True, base_revision=revision),
+        },
+    )
+    assert rejected.status_code == 409
+    assert rejected.get_json()["error"] == "workspace_empty_transition_requires_confirmation"
+    assert len(client.get("/api/workspace").get_json()["workspace"]["rows"]) == 1
+
+    accepted = client.post(
+        "/api/workspace",
+        json={
+            "workspace": basic_workspace([]),
+            "persistence": persistence_metadata(
+                expected_exists=True,
+                base_revision=revision,
+                empty_rows_intent="user_deleted_all_rows",
+            ),
+        },
+    )
+    assert accepted.status_code == 200
+    assert client.get("/api/workspace").get_json()["workspace"]["rows"] == []
+
+
+def test_workspace_first_creation_may_be_intentionally_empty(client):
+    response = client.post(
+        "/api/workspace",
+        json={
+            "workspace": basic_workspace([]),
+            "persistence": persistence_metadata(expected_exists=False),
+        },
+    )
+    assert response.status_code == 200
+    assert client.get("/api/workspace").get_json()["workspace"]["rows"] == []
 
 
 def test_export_csv_returns_expected_columns(client):

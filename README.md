@@ -95,12 +95,18 @@ https://<your-app>/api/workspace
 Expected when storage is healthy:
 
 - `"exists": true` or `"exists": false` (if no data yet)
-- no `"warning": "workspace_storage_unavailable"`
+- HTTP 200 and no `"error": "workspace_storage_unavailable"`
+
+When storage is unavailable, `GET /api/workspace` returns HTTP 503. Workspace
+writes require the revision returned by a successful GET, so a failed read
+cannot be converted into a new empty workspace.
 
 ## API Endpoints
 
 - `POST /api/extract` - upload PDF and get detected table + preview + mapping hints
 - `POST /api/export` - export CSV from workspace payload
 - `POST /api/share` - generate signed share link for read-only page
+- `GET /api/workspace` - load the workspace and its persistence revision
+- `POST /api/workspace` - save with optimistic revision and empty-state safeguards
 - `GET /shared/<token>` - read-only shared dataset view
 - `GET /api/health` - health check

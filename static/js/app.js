@@ -2,6 +2,13 @@ import { FILTER_OPERATORS, WorkspaceStore } from "./store.js";
 import { buildWorkspaceFromImport, uploadPdfWithProgress } from "./pdf.js";
 import { VirtualGrid } from "./table.js";
 import { ROLE_OPTIONS, STATUT_OPTIONS } from "./schema.js";
+import {
+  WORKSPACE_LOAD_STATES,
+  buildWorkspaceSaveEnvelope,
+  evaluateWorkspacePersistence,
+  getWorkspaceLoadErrorCode,
+  isExplicitLastRowDeletion,
+} from "./workspace-persistence.js";
 
 const dom = {
   etatVide: document.getElementById("etatVide"),
@@ -103,8 +110,22 @@ let sauvegardeEnCours = false;
 let sauvegardeRelance = false;
 let alerteSauvegardeActive = false;
 let derniereSignatureSauvegardee = "";
+let workspaceInitialLoadCompleted = false;
+let workspaceStorageAvailable = false;
+let workspaceLoadState = WORKSPACE_LOAD_STATES.NOT_STARTED;
+let workspaceStateSuspect = false;
+let workspaceExistsOnServer = false;
+let workspaceRevision = null;
+let dernierNombreLignesServeur = 0;
+let suppressionTotaleLignesConfirmee = false;
 
 const store = new WorkspaceStore((event = {}) => {
+  if (isExplicitLastRowDeletion(event, store.state.rows.length)) {
+    suppressionTotaleLignesConfirmee = true;
+  } else if (store.state.rows.length > 0 || event.reason === "resetWorkspace") {
+    suppressionTotaleLignesConfirmee = false;
+  }
+
   renderInterface();
 
   if (hydratationEnCours) {
@@ -939,14 +960,59 @@ async function copierLienPartage() {
 }
 
 function payloadWorkspace() {
-  return { workspace: store.getPersistencePayload() };
+  return buildWorkspaceSaveEnvelope(store.getPersistencePayload(), {
+    initialLoadCompleted: workspaceInitialLoadCompleted,
+    serverWorkspaceExists: workspaceExistsOnServer,
+    baseRevision: workspaceRevision,
+    emptyRowsExplicitlyAuthorized: suppressionTotaleLignesConfirmee,
+  });
 }
 
 function signatureWorkspace(payload) {
-  return JSON.stringify(payload);
+  return JSON.stringify(payload?.workspace || payload);
+}
+
+function peutSauvegarderWorkspace({ mode = "autosave", payload = null, journaliser = true } = {}) {
+  const snapshot = payload || payloadWorkspace();
+  const decision = evaluateWorkspacePersistence({
+    workspace: snapshot.workspace,
+    initialLoadCompleted: workspaceInitialLoadCompleted,
+    storageAvailable: workspaceStorageAvailable,
+    hydrationInProgress: hydratationEnCours,
+    workspaceStateSuspect,
+    saveInProgress: mode !== "schedule" && sauvegardeEnCours,
+    serverWorkspaceExists: workspaceExistsOnServer,
+    lastServerRowCount: dernierNombreLignesServeur,
+    emptyRowsExplicitlyAuthorized: suppressionTotaleLignesConfirmee,
+  });
+
+  if (!decision.allowed && journaliser) {
+    console.warn(`Sauvegarde workspace annulée (${decision.reason}).`);
+  }
+  return decision;
+}
+
+function annulerSauvegardesPlanifiees() {
+  if (timerSauvegarde) {
+    window.clearTimeout(timerSauvegarde);
+    timerSauvegarde = null;
+  }
+  sauvegardeRelance = false;
+}
+
+function bloquerPersistanceWorkspace(state = WORKSPACE_LOAD_STATES.STORAGE_UNAVAILABLE) {
+  workspaceStorageAvailable = false;
+  workspaceStateSuspect = true;
+  workspaceLoadState = state;
+  annulerSauvegardesPlanifiees();
 }
 
 function planifierSauvegardeWorkspace(delay = 800) {
+  const decision = peutSauvegarderWorkspace({ mode: "schedule", journaliser: false });
+  if (!decision.allowed) {
+    return;
+  }
+
   if (timerSauvegarde) {
     window.clearTimeout(timerSauvegarde);
   }
@@ -958,22 +1024,12 @@ function planifierSauvegardeWorkspace(delay = 800) {
 }
 
 async function sauvegarderWorkspace() {
-  if (hydratationEnCours) {
-    return;
-  }
-
-  if (sauvegardeEnCours) {
-    sauvegardeRelance = true;
-    return;
-  }
-
   const payload = payloadWorkspace();
-
-  // Garde-fou : si on n'a aucune colonne en mémoire, on ne sauvegarde JAMAIS.
-  // Un workspace sans colonne ni ligne est presque toujours un état erroné
-  // (échec de chargement, race condition, etc.) qui écraserait des données réelles.
-  if (!payload.workspace.columns || payload.workspace.columns.length === 0) {
-    console.warn("Sauvegarde annulée : workspace sans colonne (état suspect).");
+  const decision = peutSauvegarderWorkspace({ mode: "autosave", payload });
+  if (!decision.allowed) {
+    if (decision.reason === "save_in_progress") {
+      sauvegardeRelance = true;
+    }
     return;
   }
 
@@ -983,30 +1039,51 @@ async function sauvegarderWorkspace() {
   }
 
   sauvegardeEnCours = true;
+  let sauvegardeReussie = false;
   try {
     const response = await fetch("/api/workspace", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: signature,
+      body: JSON.stringify(payload),
     });
+    const data = await response.json().catch(() => ({}));
 
-    if (!response.ok) {
-      const data = await response.json().catch(() => ({}));
-      throw new Error(data.error || "Echec de sauvegarde.");
+    if (!response.ok || data?.error) {
+      const error = new Error(data.message || data.error || "Echec de sauvegarde.");
+      error.code = data.error || "workspace_save_failed";
+      error.status = response.status;
+      throw error;
+    }
+    if (!data.revision) {
+      throw new Error("La sauvegarde n'a pas renvoyé de révision exploitable.");
     }
 
+    workspaceRevision = data.revision;
+    workspaceExistsOnServer = true;
+    dernierNombreLignesServeur = payload.workspace.rows.length;
+    suppressionTotaleLignesConfirmee = false;
     derniereSignatureSauvegardee = signature;
     alerteSauvegardeActive = false;
+    sauvegardeReussie = true;
   } catch (error) {
+    const conflict = error?.status === 409 || error?.code === "workspace_conflict";
+    bloquerPersistanceWorkspace(
+      conflict ? WORKSPACE_LOAD_STATES.CONFLICT : WORKSPACE_LOAD_STATES.STORAGE_UNAVAILABLE,
+    );
     if (!alerteSauvegardeActive) {
-      afficherToast("Sauvegarde automatique indisponible.", "warning");
+      afficherToast(
+        conflict
+          ? "Le workspace a changé ailleurs. Recharge la page avant de continuer."
+          : "Sauvegarde automatique indisponible. Recharge la page plus tard.",
+        "warning",
+      );
       alerteSauvegardeActive = true;
     }
-    console.error(error);
+    console.error("Echec de sauvegarde du workspace :", error);
   } finally {
     sauvegardeEnCours = false;
 
-    if (sauvegardeRelance) {
+    if (sauvegardeReussie && sauvegardeRelance) {
       sauvegardeRelance = false;
       planifierSauvegardeWorkspace(250);
     }
@@ -1014,44 +1091,73 @@ async function sauvegarderWorkspace() {
 }
 
 async function chargerWorkspacePersistant() {
-  let chargementOk = false;
+  workspaceLoadState = WORKSPACE_LOAD_STATES.LOADING;
+  workspaceInitialLoadCompleted = false;
+  workspaceStorageAvailable = false;
+  workspaceStateSuspect = false;
+
+  let schemaModifie = false;
+  let signatureServeur = "";
   try {
     const response = await fetch("/api/workspace", { method: "GET", headers: { Accept: "application/json" } });
-    if (!response.ok) {
-      return;
-    }
-
     const data = await response.json().catch(() => ({}));
 
+    const loadErrorCode = getWorkspaceLoadErrorCode(response.ok, data);
+    if (loadErrorCode) {
+      const error = new Error(data.detail || data.message || loadErrorCode || "Chargement du workspace impossible.");
+      error.code = loadErrorCode;
+      error.status = response.status;
+      throw error;
+    }
+    if (typeof data.exists !== "boolean") {
+      throw new Error("Réponse de chargement ambiguë : le champ exists est absent.");
+    }
+    if (data.exists && (!data.workspace || typeof data.workspace !== "object" || !data.revision)) {
+      throw new Error("Réponse de chargement invalide : workspace ou révision absent.");
+    }
+    if (!data.exists && data.workspace !== null) {
+      throw new Error("Réponse de chargement incohérente pour un workspace inexistant.");
+    }
+
     hydratationEnCours = true;
-    if (data?.workspace) {
+    if (data.exists) {
+      signatureServeur = signatureWorkspace({ workspace: data.workspace });
       store.hydrateWorkspace(data.workspace);
     }
 
-    // Migration douce + initialisation : garantit le schéma de prospection cible.
-    store.ensureProspectionSchema();
+    // Cette initialisation n'est autorisée qu'après une lecture distante validée.
+    schemaModifie = store.ensureProspectionSchema();
 
     if (dom.champRecherche) {
       dom.champRecherche.value = store.state.searchQuery || "";
     }
 
-    derniereSignatureSauvegardee = signatureWorkspace(payloadWorkspace());
-    chargementOk = true;
+    workspaceInitialLoadCompleted = true;
+    workspaceStorageAvailable = true;
+    workspaceStateSuspect = false;
+    workspaceExistsOnServer = data.exists;
+    workspaceRevision = data.exists ? data.revision : null;
+    dernierNombreLignesServeur = data.exists && Array.isArray(data.workspace.rows) ? data.workspace.rows.length : 0;
+    suppressionTotaleLignesConfirmee = false;
+    workspaceLoadState = data.exists
+      ? WORKSPACE_LOAD_STATES.LOADED_EXISTING
+      : WORKSPACE_LOAD_STATES.LOADED_ABSENT;
+
+    const signatureCourante = signatureWorkspace(payloadWorkspace());
+    derniereSignatureSauvegardee = data.exists && schemaModifie ? signatureServeur : signatureCourante;
   } catch (error) {
-    console.error(error);
+    bloquerPersistanceWorkspace(WORKSPACE_LOAD_STATES.STORAGE_UNAVAILABLE);
+    console.error("Chargement du workspace distant impossible :", error);
+    afficherToast(
+      "Base temporairement indisponible : aucune sauvegarde ne sera envoyée. Recharge la page plus tard.",
+      "warning",
+    );
+    return;
   } finally {
     hydratationEnCours = false;
   }
 
-  // SECURITE : on ne déclenche JAMAIS d'auto-save tant qu'on n'a pas chargé l'état
-  // existant avec succès — sinon une coupure réseau au démarrage écraserait les
-  // données par un état vide.
-  if (!chargementOk) {
-    return;
-  }
-  // Si la migration a apporté des changements, l'auto-save les persistera après debounce.
-  // Mais seulement si on a des données (jamais auto-save un workspace vide).
-  if (store.state.columns.length > 0) {
+  if (workspaceExistsOnServer && schemaModifie) {
     planifierSauvegardeWorkspace(400);
   }
 }
@@ -1279,30 +1385,32 @@ function bindEvents() {
   });
 
   window.addEventListener("beforeunload", () => {
-    if (hydratationEnCours) {
+    const payload = payloadWorkspace();
+    const decision = peutSauvegarderWorkspace({ mode: "beacon", payload, journaliser: false });
+    if (!decision.allowed) {
       return;
     }
-    if (timerSauvegarde) {
-      window.clearTimeout(timerSauvegarde);
-      timerSauvegarde = null;
-    }
 
-    const payload = payloadWorkspace();
     const signature = signatureWorkspace(payload);
     if (signature === derniereSignatureSauvegardee) {
       return;
     }
 
+    annulerSauvegardesPlanifiees();
     if (navigator.sendBeacon) {
-      const blob = new Blob([signature], { type: "application/json" });
-      navigator.sendBeacon("/api/workspace", blob);
+      const blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
+      const queued = navigator.sendBeacon("/api/workspace", blob);
+      if (!queued) {
+        console.warn("Le beacon de sauvegarde du workspace n'a pas pu être mis en file.");
+      }
     }
   });
 }
 
 async function init() {
-  bindEvents();
+  renderInterface();
   await chargerWorkspacePersistant();
+  bindEvents();
   renderInterface();
 }
 
