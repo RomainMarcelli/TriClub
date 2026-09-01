@@ -1,0 +1,36 @@
+name: Supabase keepalive
+
+on:
+  schedule:
+    - cron: "17 8 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: supabase-keepalive
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify configuration
+        env:
+          APP_URL: ${{ vars.TRICLUB_APP_URL }}
+          KEEPALIVE_TOKEN: ${{ secrets.TRICLUB_KEEPALIVE_TOKEN }}
+        run: |
+          test -n "$APP_URL"
+          test -n "$KEEPALIVE_TOKEN"
+
+      - name: Read Supabase-backed workspace metadata
+        env:
+          APP_URL: ${{ vars.TRICLUB_APP_URL }}
+          KEEPALIVE_TOKEN: ${{ secrets.TRICLUB_KEEPALIVE_TOKEN }}
+        run: |
+          curl --fail --silent --show-error \
+            --retry 2 --retry-delay 10 --max-time 90 \
+            -H "Authorization: Bearer ${KEEPALIVE_TOKEN}" \
+            "${APP_URL%/}/api/system/keepalive"

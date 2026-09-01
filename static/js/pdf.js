@@ -20,7 +20,7 @@ function uid(prefix = "id") {
 }
 
 export function uploadPdfWithProgress(file, handlers = {}) {
-  const { onUploadProgress = () => {}, onExtractionProgress = () => {} } = handlers;
+  const { onUploadProgress = () => {}, onExtractionProgress = () => {}, csrfToken = "" } = handlers;
 
   return new Promise((resolve, reject) => {
     const formData = new FormData();
@@ -28,6 +28,9 @@ export function uploadPdfWithProgress(file, handlers = {}) {
 
     const xhr = new XMLHttpRequest();
     xhr.open("POST", "/api/extract", true);
+    if (csrfToken) {
+      xhr.setRequestHeader("X-CSRF-Token", csrfToken);
+    }
 
     let extractionProgress = 0;
     let extractionTick = null;
@@ -61,7 +64,10 @@ export function uploadPdfWithProgress(file, handlers = {}) {
       if (xhr.status >= 200 && xhr.status < 300) {
         resolve(payload);
       } else {
-        reject(new Error(payload.error || "Extraction failed."));
+        const error = new Error(payload.error || "Extraction failed.");
+        error.status = xhr.status;
+        error.code = payload.error || "extract_failed";
+        reject(error);
       }
     };
 

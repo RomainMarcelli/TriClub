@@ -1,10 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  DATABASE_STATES,
   buildWorkspaceSaveEnvelope,
   evaluateWorkspacePersistence,
   getWorkspaceLoadErrorCode,
   isExplicitLastRowDeletion,
+  recoveryActionAfterProbe,
 } from "../../static/js/workspace-persistence.js";
 
 const columns = [{ id: "col_name", name: "Nom", type: "text" }];
@@ -14,6 +16,7 @@ function decision(overrides = {}) {
     workspace: { columns, rows: [{ id: "r1", values: { col_name: "Club" } }] },
     initialLoadCompleted: true,
     storageAvailable: true,
+    databaseState: DATABASE_STATES.AVAILABLE,
     hydrationInProgress: false,
     workspaceStateSuspect: false,
     saveInProgress: false,
@@ -34,6 +37,28 @@ test("un chargement initial incomplet interdit toute sauvegarde", () => {
 test("un stockage indisponible interdit autosave et beacon", () => {
   assert.equal(decision({ storageAvailable: false }).allowed, false);
   assert.equal(decision({ storageAvailable: false, saveInProgress: true }).allowed, false);
+});
+
+test("les états Supabase en pause et reprise bloquent autosave et beacon", () => {
+  assert.deepEqual(decision({ databaseState: DATABASE_STATES.SUPABASE_PAUSED }), {
+    allowed: false,
+    reason: "database_supabase_paused",
+  });
+  assert.deepEqual(decision({ databaseState: DATABASE_STATES.RESTORING }), {
+    allowed: false,
+    reason: "database_restoring",
+  });
+});
+
+test("une reprise exige toujours un rechargement GET avant de réautoriser la persistance", () => {
+  assert.deepEqual(recoveryActionAfterProbe(DATABASE_STATES.RESTORING, true), {
+    action: "reload_workspace",
+    persistenceAllowed: false,
+  });
+  assert.deepEqual(recoveryActionAfterProbe(DATABASE_STATES.RESTORING, false), {
+    action: "wait",
+    persistenceAllowed: false,
+  });
 });
 
 test("le format historique HTTP 200 + warning reste traité comme une panne", () => {
@@ -91,9 +116,11 @@ test("l'enveloppe POST transporte la révision et l'intention de suppression", (
     serverWorkspaceExists: true,
     baseRevision: "revision-1",
     emptyRowsExplicitlyAuthorized: true,
+    csrfToken: "csrf-test",
   });
 
   assert.equal(payload.workspace, workspace);
+  assert.equal(payload.csrfToken, "csrf-test");
   assert.deepEqual(payload.persistence, {
     initialLoadCompleted: true,
     expectedExists: true,

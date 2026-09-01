@@ -7,6 +7,15 @@ export const WORKSPACE_LOAD_STATES = Object.freeze({
   CONFLICT: "conflict",
 });
 
+export const DATABASE_STATES = Object.freeze({
+  CHECKING: "checking",
+  AVAILABLE: "available",
+  UNAVAILABLE: "unavailable",
+  SUPABASE_PAUSED: "supabase_paused",
+  RESTORING: "restoring",
+  CONFLICT: "conflict",
+});
+
 export function getWorkspaceLoadErrorCode(responseOk, data) {
   if (data?.error) {
     return String(data.error);
@@ -24,6 +33,7 @@ export function evaluateWorkspacePersistence({
   workspace,
   initialLoadCompleted,
   storageAvailable,
+  databaseState,
   hydrationInProgress,
   workspaceStateSuspect,
   saveInProgress = false,
@@ -31,6 +41,9 @@ export function evaluateWorkspacePersistence({
   lastServerRowCount,
   emptyRowsExplicitlyAuthorized,
 }) {
+  if (databaseState && databaseState !== DATABASE_STATES.AVAILABLE) {
+    return { allowed: false, reason: `database_${databaseState}` };
+  }
   if (!initialLoadCompleted) {
     return { allowed: false, reason: "initial_load_incomplete" };
   }
@@ -68,9 +81,11 @@ export function buildWorkspaceSaveEnvelope(workspace, {
   serverWorkspaceExists,
   baseRevision,
   emptyRowsExplicitlyAuthorized,
+  csrfToken,
 }) {
   return {
     workspace,
+    csrfToken: csrfToken || null,
     persistence: {
       initialLoadCompleted: initialLoadCompleted === true,
       expectedExists: serverWorkspaceExists === true,
@@ -78,6 +93,21 @@ export function buildWorkspaceSaveEnvelope(workspace, {
       emptyRowsIntent: emptyRowsExplicitlyAuthorized ? "user_deleted_all_rows" : null,
     },
   };
+}
+
+export function recoveryActionAfterProbe(databaseState, probeSucceeded) {
+  if (!probeSucceeded) {
+    return { action: "wait", persistenceAllowed: false };
+  }
+  if (
+    databaseState === DATABASE_STATES.SUPABASE_PAUSED ||
+    databaseState === DATABASE_STATES.RESTORING ||
+    databaseState === DATABASE_STATES.UNAVAILABLE ||
+    databaseState === DATABASE_STATES.CONFLICT
+  ) {
+    return { action: "reload_workspace", persistenceAllowed: false };
+  }
+  return { action: "none", persistenceAllowed: databaseState === DATABASE_STATES.AVAILABLE };
 }
 
 export function isExplicitLastRowDeletion(event, currentRowCount) {

@@ -3,11 +3,13 @@ import { buildWorkspaceFromImport, uploadPdfWithProgress } from "./pdf.js";
 import { VirtualGrid } from "./table.js";
 import { ROLE_OPTIONS, STATUT_OPTIONS } from "./schema.js";
 import {
+  DATABASE_STATES,
   WORKSPACE_LOAD_STATES,
   buildWorkspaceSaveEnvelope,
   evaluateWorkspacePersistence,
   getWorkspaceLoadErrorCode,
   isExplicitLastRowDeletion,
+  recoveryActionAfterProbe,
 } from "./workspace-persistence.js";
 
 const dom = {
@@ -100,9 +102,18 @@ const dom = {
   apercuLigneSuppression: document.getElementById("apercuLigneSuppression"),
 
   toast: document.getElementById("toast"),
+  databaseStatus: document.getElementById("databaseStatus"),
+  databaseStatusLabel: document.getElementById("databaseStatusLabel"),
+  supabasePausedPanel: document.getElementById("supabasePausedPanel"),
+  supabasePausedMessage: document.getElementById("supabasePausedMessage"),
+  btnResumeSupabase: document.getElementById("btnResumeSupabase"),
+  btnCreerBackup: document.getElementById("btnCreerBackup"),
+  listeBackups: document.getElementById("listeBackups"),
 };
 
 const RAISONS_SANS_SAUVEGARDE = new Set(["setSelectedColumn", "setSelectedRow"]);
+const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content || "";
+const utilisateurAdmin = document.body.dataset.isAdmin === "true";
 
 let hydratationEnCours = false;
 let timerSauvegarde = null;
@@ -113,6 +124,7 @@ let derniereSignatureSauvegardee = "";
 let workspaceInitialLoadCompleted = false;
 let workspaceStorageAvailable = false;
 let workspaceLoadState = WORKSPACE_LOAD_STATES.NOT_STARTED;
+let databaseState = DATABASE_STATES.CHECKING;
 let workspaceStateSuspect = false;
 let workspaceExistsOnServer = false;
 let workspaceRevision = null;
@@ -368,6 +380,72 @@ function afficherToast(message, tone = "info") {
   }, 2600);
 }
 
+function jsonHeaders() {
+  return { "Content-Type": "application/json", "X-CSRF-Token": csrfToken };
+}
+
+function redirigerSiSessionExpiree(response, data = {}) {
+  if (response.status === 401 && data?.error === "authentication_required") {
+    window.location.assign("/login");
+    return true;
+  }
+  return false;
+}
+
+function afficherStatutBase(label, cssState) {
+  if (!dom.databaseStatus || !dom.databaseStatusLabel) {
+    return;
+  }
+  dom.databaseStatusLabel.textContent = label;
+  dom.databaseStatus.className = `database-status is-${cssState}`;
+}
+
+function definirEtatBase(state, detail = "") {
+  databaseState = state;
+  const locked = state !== DATABASE_STATES.AVAILABLE;
+  document.body.classList.toggle("workspace-locked", locked);
+  [document.querySelector(".barre-outils"), dom.etatVide, dom.sectionTableau].forEach((element) => {
+    if (element) {
+      element.inert = locked;
+    }
+  });
+  [dom.btnImporterHaut, dom.btnExporterHaut, dom.btnPartagerHaut].forEach((button) => {
+    if (button) {
+      button.disabled = locked;
+    }
+  });
+  if (dom.btnCreerBackup) {
+    dom.btnCreerBackup.disabled = locked;
+  }
+  if (dom.listeBackups) {
+    dom.listeBackups.inert = locked;
+  }
+
+  const status = {
+    [DATABASE_STATES.CHECKING]: ["Vérification de la base…", "checking"],
+    [DATABASE_STATES.AVAILABLE]: ["Base connectée", "available"],
+    [DATABASE_STATES.UNAVAILABLE]: ["Base indisponible", "unavailable"],
+    [DATABASE_STATES.SUPABASE_PAUSED]: ["Supabase en pause", "paused"],
+    [DATABASE_STATES.RESTORING]: ["Reprise en cours…", "restoring"],
+    [DATABASE_STATES.CONFLICT]: ["Conflit de version", "conflict"],
+  }[state] || ["État inconnu", "unavailable"];
+  afficherStatutBase(status[0], status[1]);
+
+  if (dom.supabasePausedPanel) {
+    dom.supabasePausedPanel.classList.toggle("hidden", state !== DATABASE_STATES.SUPABASE_PAUSED);
+  }
+  if (dom.supabasePausedMessage && detail) {
+    dom.supabasePausedMessage.textContent = detail;
+  }
+  if (dom.btnResumeSupabase) {
+    dom.btnResumeSupabase.disabled = state === DATABASE_STATES.RESTORING;
+  }
+}
+
+function attendre(delay) {
+  return new Promise((resolve) => window.setTimeout(resolve, delay));
+}
+
 function ouvrirModal(modal) {
   if (!modal) {
     return;
@@ -459,6 +537,7 @@ async function importerPdf(file) {
     const payload = await uploadPdfWithProgress(file, {
       onUploadProgress: (p) => setProgress(dom.barreUpload, p),
       onExtractionProgress: (p) => setProgress(dom.barreExtraction, p),
+      csrfToken,
     });
 
     payloadImport = payload;
@@ -475,6 +554,10 @@ async function importerPdf(file) {
     dom.statutImport.textContent = "Apercu pret.";
     setEtapeImport("preview");
   } catch (error) {
+    if (error?.status === 401 && error?.code === "authentication_required") {
+      window.location.assign("/login");
+      return;
+    }
     dom.statutImport.textContent = error.message || "Import impossible.";
     afficherToast(error.message || "Import impossible.", "danger");
   }
@@ -845,12 +928,15 @@ async function exporterDepuisModal() {
   try {
     const response = await fetch("/api/export", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: jsonHeaders(),
       body: JSON.stringify(payload),
     });
 
     if (!response.ok) {
       const err = await response.json().catch(() => ({}));
+      if (redirigerSiSessionExpiree(response, err)) {
+        return;
+      }
       throw new Error(err.error || "Echec export.");
     }
 
@@ -929,11 +1015,14 @@ async function genererLienPartage() {
   try {
     const response = await fetch("/api/share", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: jsonHeaders(),
       body: JSON.stringify({ workspace: store.buildSharePayload() }),
     });
 
     const data = await response.json().catch(() => ({}));
+    if (redirigerSiSessionExpiree(response, data)) {
+      return;
+    }
     if (!response.ok) {
       throw new Error(data.error || "Impossible de generer le lien.");
     }
@@ -965,6 +1054,7 @@ function payloadWorkspace() {
     serverWorkspaceExists: workspaceExistsOnServer,
     baseRevision: workspaceRevision,
     emptyRowsExplicitlyAuthorized: suppressionTotaleLignesConfirmee,
+    csrfToken,
   });
 }
 
@@ -978,6 +1068,7 @@ function peutSauvegarderWorkspace({ mode = "autosave", payload = null, journalis
     workspace: snapshot.workspace,
     initialLoadCompleted: workspaceInitialLoadCompleted,
     storageAvailable: workspaceStorageAvailable,
+    databaseState,
     hydrationInProgress: hydratationEnCours,
     workspaceStateSuspect,
     saveInProgress: mode !== "schedule" && sauvegardeEnCours,
@@ -1000,11 +1091,15 @@ function annulerSauvegardesPlanifiees() {
   sauvegardeRelance = false;
 }
 
-function bloquerPersistanceWorkspace(state = WORKSPACE_LOAD_STATES.STORAGE_UNAVAILABLE) {
+function bloquerPersistanceWorkspace(
+  state = WORKSPACE_LOAD_STATES.STORAGE_UNAVAILABLE,
+  nextDatabaseState = DATABASE_STATES.UNAVAILABLE,
+) {
   workspaceStorageAvailable = false;
   workspaceStateSuspect = true;
   workspaceLoadState = state;
   annulerSauvegardesPlanifiees();
+  definirEtatBase(nextDatabaseState);
 }
 
 function planifierSauvegardeWorkspace(delay = 800) {
@@ -1039,14 +1134,18 @@ async function sauvegarderWorkspace() {
   }
 
   sauvegardeEnCours = true;
+  afficherStatutBase("Sauvegarde…", "saving");
   let sauvegardeReussie = false;
   try {
     const response = await fetch("/api/workspace", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: jsonHeaders(),
       body: JSON.stringify(payload),
     });
     const data = await response.json().catch(() => ({}));
+    if (redirigerSiSessionExpiree(response, data)) {
+      return;
+    }
 
     if (!response.ok || data?.error) {
       const error = new Error(data.message || data.error || "Echec de sauvegarde.");
@@ -1065,15 +1164,24 @@ async function sauvegarderWorkspace() {
     derniereSignatureSauvegardee = signature;
     alerteSauvegardeActive = false;
     sauvegardeReussie = true;
+    afficherStatutBase("Sauvegardé", "saved");
   } catch (error) {
     const conflict = error?.status === 409 || error?.code === "workspace_conflict";
+    const paused = error?.code === "supabase_paused";
     bloquerPersistanceWorkspace(
       conflict ? WORKSPACE_LOAD_STATES.CONFLICT : WORKSPACE_LOAD_STATES.STORAGE_UNAVAILABLE,
+      conflict
+        ? DATABASE_STATES.CONFLICT
+        : paused
+          ? DATABASE_STATES.SUPABASE_PAUSED
+          : DATABASE_STATES.UNAVAILABLE,
     );
     if (!alerteSauvegardeActive) {
       afficherToast(
         conflict
           ? "Le workspace a changé ailleurs. Recharge la page avant de continuer."
+          : paused
+            ? "Le projet Supabase est en pause. Aucune écriture ne sera envoyée."
           : "Sauvegarde automatique indisponible. Recharge la page plus tard.",
         "warning",
       );
@@ -1090,21 +1198,26 @@ async function sauvegarderWorkspace() {
   }
 }
 
-async function chargerWorkspacePersistant() {
+async function chargerWorkspacePersistant({ silencieux = false, recoveryInProgress = false } = {}) {
+  annulerSauvegardesPlanifiees();
   workspaceLoadState = WORKSPACE_LOAD_STATES.LOADING;
   workspaceInitialLoadCompleted = false;
   workspaceStorageAvailable = false;
   workspaceStateSuspect = false;
+  definirEtatBase(DATABASE_STATES.CHECKING);
 
   let schemaModifie = false;
   let signatureServeur = "";
   try {
     const response = await fetch("/api/workspace", { method: "GET", headers: { Accept: "application/json" } });
     const data = await response.json().catch(() => ({}));
+    if (redirigerSiSessionExpiree(response, data)) {
+      return false;
+    }
 
     const loadErrorCode = getWorkspaceLoadErrorCode(response.ok, data);
     if (loadErrorCode) {
-      const error = new Error(data.detail || data.message || loadErrorCode || "Chargement du workspace impossible.");
+      const error = new Error(data.message || loadErrorCode || "Chargement du workspace impossible.");
       error.code = loadErrorCode;
       error.status = response.status;
       throw error;
@@ -1123,6 +1236,16 @@ async function chargerWorkspacePersistant() {
     if (data.exists) {
       signatureServeur = signatureWorkspace({ workspace: data.workspace });
       store.hydrateWorkspace(data.workspace);
+    } else {
+      store.hydrateWorkspace({
+        columns: [],
+        rows: [],
+        filters: [],
+        searchQuery: "",
+        sort: null,
+        views: [],
+        activeViewId: "",
+      });
     }
 
     // Cette initialisation n'est autorisée qu'après une lecture distante validée.
@@ -1142,23 +1265,187 @@ async function chargerWorkspacePersistant() {
     workspaceLoadState = data.exists
       ? WORKSPACE_LOAD_STATES.LOADED_EXISTING
       : WORKSPACE_LOAD_STATES.LOADED_ABSENT;
+    definirEtatBase(DATABASE_STATES.AVAILABLE);
 
     const signatureCourante = signatureWorkspace(payloadWorkspace());
     derniereSignatureSauvegardee = data.exists && schemaModifie ? signatureServeur : signatureCourante;
   } catch (error) {
-    bloquerPersistanceWorkspace(WORKSPACE_LOAD_STATES.STORAGE_UNAVAILABLE);
-    console.error("Chargement du workspace distant impossible :", error);
-    afficherToast(
-      "Base temporairement indisponible : aucune sauvegarde ne sera envoyée. Recharge la page plus tard.",
-      "warning",
+    const paused = error?.code === "supabase_paused";
+    bloquerPersistanceWorkspace(
+      WORKSPACE_LOAD_STATES.STORAGE_UNAVAILABLE,
+      recoveryInProgress
+        ? DATABASE_STATES.RESTORING
+        : paused
+          ? DATABASE_STATES.SUPABASE_PAUSED
+          : DATABASE_STATES.UNAVAILABLE,
     );
-    return;
+    console.error("Chargement du workspace distant impossible :", error);
+    if (!silencieux) {
+      afficherToast(
+        paused
+          ? "Le projet Supabase est en pause. Aucune sauvegarde ne sera envoyée."
+          : "Base temporairement indisponible : aucune sauvegarde ne sera envoyée. Recharge la page plus tard.",
+        "warning",
+      );
+    }
+    return false;
   } finally {
     hydratationEnCours = false;
   }
 
   if (workspaceExistsOnServer && schemaModifie) {
     planifierSauvegardeWorkspace(400);
+  }
+  return true;
+}
+
+function afficherBackups(backups) {
+  if (!dom.listeBackups) {
+    return;
+  }
+  if (!Array.isArray(backups) || backups.length === 0) {
+    dom.listeBackups.innerHTML = '<p class="texte-discret">Aucun backup disponible.</p>';
+    return;
+  }
+  dom.listeBackups.innerHTML = backups
+    .map((backup) => {
+      const date = new Date(backup.created_at);
+      const dateLabel = Number.isNaN(date.getTime()) ? texte(backup.created_at) : date.toLocaleString("fr-FR");
+      return `
+        <div class="backup-row">
+          <div class="backup-meta">
+            <strong>#${Number(backup.id)} · ${echapperHtml(backup.reason || "backup")}</strong>
+            <span class="texte-discret">${echapperHtml(dateLabel)} · ${Number(backup.row_count) || 0} lignes</span>
+          </div>
+          <button class="btn-secondaire petit" type="button" data-restore-backup="${Number(backup.id)}">Restaurer</button>
+        </div>`;
+    })
+    .join("");
+}
+
+async function chargerBackups() {
+  if (!utilisateurAdmin || !dom.listeBackups) {
+    return;
+  }
+  try {
+    const response = await fetch("/api/admin/backups", { headers: { Accept: "application/json" } });
+    const data = await response.json().catch(() => ({}));
+    if (redirigerSiSessionExpiree(response, data)) {
+      return;
+    }
+    if (!response.ok) {
+      throw new Error(data.error || "Liste des backups indisponible.");
+    }
+    afficherBackups(data.backups);
+  } catch (error) {
+    dom.listeBackups.innerHTML = `<p class="texte-discret">${echapperHtml(error.message)}</p>`;
+  }
+}
+
+async function creerBackupManuel() {
+  if (databaseState !== DATABASE_STATES.AVAILABLE) {
+    afficherToast("La base doit être connectée pour créer un backup.", "warning");
+    return;
+  }
+  dom.btnCreerBackup.disabled = true;
+  try {
+    const response = await fetch("/api/admin/backups", {
+      method: "POST",
+      headers: jsonHeaders(),
+      body: "{}",
+    });
+    const data = await response.json().catch(() => ({}));
+    if (redirigerSiSessionExpiree(response, data)) {
+      return;
+    }
+    if (!response.ok) {
+      throw new Error(data.error || "Création du backup impossible.");
+    }
+    afficherToast("Backup créé.", "success");
+    await chargerBackups();
+  } catch (error) {
+    afficherToast(error.message || "Création du backup impossible.", "danger");
+  } finally {
+    dom.btnCreerBackup.disabled = databaseState !== DATABASE_STATES.AVAILABLE;
+  }
+}
+
+async function restaurerBackup(backupId) {
+  if (!window.confirm(`Restaurer le backup #${backupId} ? Le workspace actuel sera d'abord sauvegardé.`)) {
+    return;
+  }
+
+  bloquerPersistanceWorkspace(WORKSPACE_LOAD_STATES.LOADING, DATABASE_STATES.RESTORING);
+  workspaceInitialLoadCompleted = false;
+  try {
+    const response = await fetch(`/api/admin/backups/${backupId}/restore`, {
+      method: "POST",
+      headers: jsonHeaders(),
+      body: JSON.stringify({ confirm: "RESTORE" }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (redirigerSiSessionExpiree(response, data)) {
+      return;
+    }
+    if (!response.ok) {
+      throw new Error(data.error || "Restauration impossible.");
+    }
+
+    const reloaded = await chargerWorkspacePersistant({ silencieux: true, recoveryInProgress: true });
+    if (!reloaded) {
+      throw new Error("Backup restauré, mais le workspace n'a pas pu être rechargé.");
+    }
+    afficherToast("Backup restauré et workspace rechargé.", "success");
+    await chargerBackups();
+  } catch (error) {
+    bloquerPersistanceWorkspace(WORKSPACE_LOAD_STATES.STORAGE_UNAVAILABLE, DATABASE_STATES.UNAVAILABLE);
+    afficherToast(error.message || "Restauration impossible.", "danger");
+  }
+}
+
+async function attendreRepriseSupabase() {
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    await attendre(attempt === 0 ? 2500 : 5000);
+    const action = recoveryActionAfterProbe(DATABASE_STATES.RESTORING, true);
+    if (action.action !== "reload_workspace") {
+      continue;
+    }
+    const loaded = await chargerWorkspacePersistant({ silencieux: true, recoveryInProgress: true });
+    if (loaded) {
+      afficherToast("Supabase est de nouveau disponible. Workspace rechargé.", "success");
+      await chargerBackups();
+      return true;
+    }
+    definirEtatBase(DATABASE_STATES.RESTORING);
+  }
+  bloquerPersistanceWorkspace(WORKSPACE_LOAD_STATES.STORAGE_UNAVAILABLE, DATABASE_STATES.UNAVAILABLE);
+  afficherToast("La reprise prend plus de temps que prévu. Réessaie plus tard.", "warning");
+  return false;
+}
+
+async function reprendreSupabase() {
+  if (!window.confirm("Demander la reprise du projet Supabase ? Les écritures resteront bloquées jusqu'au rechargement.")) {
+    return;
+  }
+  bloquerPersistanceWorkspace(WORKSPACE_LOAD_STATES.LOADING, DATABASE_STATES.RESTORING);
+  workspaceInitialLoadCompleted = false;
+  try {
+    const response = await fetch("/api/admin/supabase/resume", {
+      method: "POST",
+      headers: jsonHeaders(),
+      body: "{}",
+    });
+    const data = await response.json().catch(() => ({}));
+    if (redirigerSiSessionExpiree(response, data)) {
+      return;
+    }
+    if (!response.ok && data.error !== "supabase_project_already_active") {
+      throw new Error(data.message || data.error || "La reprise Supabase a échoué.");
+    }
+    await attendreRepriseSupabase();
+  } catch (error) {
+    bloquerPersistanceWorkspace(WORKSPACE_LOAD_STATES.STORAGE_UNAVAILABLE, DATABASE_STATES.SUPABASE_PAUSED);
+    afficherToast(error.message || "La reprise Supabase a échoué.", "danger");
   }
 }
 
@@ -1202,6 +1489,16 @@ function renderInterface() {
 }
 
 function bindEvents() {
+  dom.btnResumeSupabase?.addEventListener("click", reprendreSupabase);
+  dom.btnCreerBackup?.addEventListener("click", creerBackupManuel);
+  dom.listeBackups?.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-restore-backup]");
+    const backupId = Number(button?.dataset.restoreBackup);
+    if (Number.isInteger(backupId) && backupId > 0) {
+      restaurerBackup(backupId);
+    }
+  });
+
   [dom.btnImporterHaut, dom.btnImporterVide].forEach((btn) => {
     btn?.addEventListener("click", ouvrirImport);
   });
@@ -1411,6 +1708,9 @@ async function init() {
   renderInterface();
   await chargerWorkspacePersistant();
   bindEvents();
+  if (utilisateurAdmin) {
+    await chargerBackups();
+  }
   renderInterface();
 }
 
