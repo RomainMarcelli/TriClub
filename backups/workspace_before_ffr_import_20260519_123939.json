@@ -1,0 +1,19 @@
+{
+  "columns": [],
+  "rows": [],
+  "filters": [],
+  "searchQuery": "",
+  "sort": null,
+  "views": [
+    {
+      "id": "view_default",
+      "name": "Vue par defaut",
+      "filters": [],
+      "sort": null,
+      "hiddenColumnIds": []
+    }
+  ],
+  "activeViewId": "view_default",
+  "selectedColumnId": "",
+  "selectedRowId": ""
+}
