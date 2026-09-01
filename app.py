@@ -100,6 +100,7 @@ DB_LOCK = threading.Lock()
 WORKSPACE_WRITE_LOCK = threading.Lock()
 WORKSPACE_RECOVERY_LOCK = threading.Lock()
 WORKSPACE_RECOVERY_STATE = "idle"
+WORKSPACE_READ_EPOCH = secrets.token_urlsafe(24)
 try:
     WORKSPACE_BACKUP_INTERVAL_SECONDS = max(
         60,
@@ -159,22 +160,56 @@ def set_workspace_recovery_state(value: str) -> None:
         WORKSPACE_RECOVERY_STATE = value
 
 
+def begin_workspace_recovery() -> str:
+    """Rotate the read epoch only after every in-flight workspace write has completed."""
+    global WORKSPACE_READ_EPOCH, WORKSPACE_RECOVERY_STATE
+    with WORKSPACE_WRITE_LOCK:
+        with WORKSPACE_RECOVERY_LOCK:
+            WORKSPACE_READ_EPOCH = secrets.token_urlsafe(24)
+            WORKSPACE_RECOVERY_STATE = "operation"
+            return WORKSPACE_READ_EPOCH
+
+
 def is_workspace_recovery_pending() -> bool:
     with WORKSPACE_RECOVERY_LOCK:
         return WORKSPACE_RECOVERY_STATE != "idle"
 
 
-def complete_workspace_recovery_after_read() -> bool:
+def complete_workspace_recovery_after_read() -> str | None:
     global WORKSPACE_RECOVERY_STATE
     with WORKSPACE_RECOVERY_LOCK:
         if WORKSPACE_RECOVERY_STATE == "operation":
-            return False
+            return None
         WORKSPACE_RECOVERY_STATE = "idle"
-        return True
+        return WORKSPACE_READ_EPOCH
 
 
-def set_session_workspace_read_verified(value: bool) -> None:
-    session["workspace_read_verified"] = value
+def invalidate_session_workspace_read() -> None:
+    session["workspace_read_verified"] = False
+    session.pop("workspace_read_epoch", None)
+
+
+def mark_session_workspace_read(epoch: str) -> None:
+    session["workspace_read_verified"] = True
+    session["workspace_read_epoch"] = epoch
+
+
+def workspace_read_epoch_is_current(read_epoch: Any) -> bool:
+    supplied_epoch = clean_cell(read_epoch)
+    if not supplied_epoch:
+        return False
+    with WORKSPACE_RECOVERY_LOCK:
+        return bool(
+            WORKSPACE_RECOVERY_STATE == "idle"
+            and secrets.compare_digest(supplied_epoch, WORKSPACE_READ_EPOCH)
+        )
+
+
+def session_workspace_read_is_current() -> bool:
+    return bool(
+        session.get("workspace_read_verified") is True
+        and workspace_read_epoch_is_current(session.get("workspace_read_epoch"))
+    )
 
 
 def get_csrf_token() -> str:
@@ -1449,6 +1484,10 @@ class WorkspaceWriteConflict(RuntimeError):
     pass
 
 
+class WorkspaceFreshReadRequired(RuntimeError):
+    pass
+
+
 class UnsafeEmptyWorkspaceTransition(RuntimeError):
     pass
 
@@ -1459,9 +1498,13 @@ def save_workspace_state_conditionally(
     expected_exists: bool,
     base_revision: str,
     empty_rows_intent: str,
+    read_epoch: str,
 ) -> str:
     """Reject stale writes and accidental transitions to an empty workspace."""
     with WORKSPACE_WRITE_LOCK:
+        if not workspace_read_epoch_is_current(read_epoch):
+            raise WorkspaceFreshReadRequired("Une nouvelle lecture du workspace est requise.")
+
         current_record = load_workspace_record()
         current_exists = current_record is not None
 
@@ -1665,7 +1708,7 @@ def login():
     session.clear()
     session["role"] = role
     session["csrf_token"] = secrets.token_urlsafe(32)
-    session["workspace_read_verified"] = False
+    invalidate_session_workspace_read()
     session.permanent = True
     return redirect(url_for("index"))
 
@@ -1842,7 +1885,7 @@ def api_workspace_get():
     try:
         record = load_workspace_record()
     except Exception as error:
-        set_session_workspace_read_verified(False)
+        invalidate_session_workspace_read()
         app.logger.exception("Workspace load failed: %s", error)
         error_code = "supabase_paused" if is_supabase_paused_error(error) else "workspace_storage_unavailable"
         return (
@@ -1860,11 +1903,11 @@ def api_workspace_get():
             503,
         )
 
-    recovery_completed = complete_workspace_recovery_after_read()
-    if not recovery_completed:
-        set_session_workspace_read_verified(False)
+    read_epoch = complete_workspace_recovery_after_read()
+    if read_epoch is None:
+        invalidate_session_workspace_read()
         return jsonify({"error": "workspace_recovery_in_progress", "workspace": None, "exists": False}), 503
-    set_session_workspace_read_verified(True)
+    mark_session_workspace_read(read_epoch)
 
     if record is None:
         return jsonify(
@@ -1894,7 +1937,7 @@ def api_workspace_get():
 @require_user_api
 @require_csrf
 def api_workspace_post():
-    if is_workspace_recovery_pending() or session.get("workspace_read_verified") is not True:
+    if is_workspace_recovery_pending() or not session_workspace_read_is_current():
         return (
             jsonify(
                 {
@@ -1931,6 +1974,7 @@ def api_workspace_post():
 
     base_revision = clean_cell(persistence.get("baseRevision", ""))
     empty_rows_intent = clean_cell(persistence.get("emptyRowsIntent", ""))
+    session_read_epoch = clean_cell(session.get("workspace_read_epoch", ""))
 
     try:
         updated_at = save_workspace_state_conditionally(
@@ -1938,9 +1982,21 @@ def api_workspace_post():
             expected_exists=expected_exists,
             base_revision=base_revision,
             empty_rows_intent=empty_rows_intent,
+            read_epoch=session_read_epoch,
+        )
+    except WorkspaceFreshReadRequired:
+        invalidate_session_workspace_read()
+        return (
+            jsonify(
+                {
+                    "error": "workspace_fresh_read_required",
+                    "message": "Recharge le workspace distant avant toute sauvegarde.",
+                }
+            ),
+            428,
         )
     except WorkspaceWriteConflict as error:
-        set_session_workspace_read_verified(False)
+        invalidate_session_workspace_read()
         app.logger.warning("Workspace save conflict: %s", error)
         return (
             jsonify(
@@ -1963,7 +2019,7 @@ def api_workspace_post():
             409,
         )
     except Exception as error:
-        set_session_workspace_read_verified(False)
+        invalidate_session_workspace_read()
         app.logger.exception("Workspace save failed: %s", error)
         error_code = "supabase_paused" if is_supabase_paused_error(error) else "workspace_storage_unavailable"
         return (
@@ -1978,7 +2034,7 @@ def api_workspace_post():
             503,
         )
 
-    set_session_workspace_read_verified(True)
+    mark_session_workspace_read(session_read_epoch)
     return jsonify({"status": "saved", "updated_at": updated_at, "revision": updated_at})
 
 
@@ -2042,8 +2098,8 @@ def api_admin_backup_restore(backup_id: int):
     if data.get("confirm") != "RESTORE":
         return jsonify({"error": "restore_confirmation_required"}), 400
 
-    set_workspace_recovery_state("operation")
-    set_session_workspace_read_verified(False)
+    begin_workspace_recovery()
+    invalidate_session_workspace_read()
     try:
         result = restore_workspace_backup(backup_id)
     except Exception as error:
@@ -2063,8 +2119,8 @@ def api_admin_backup_restore(backup_id: int):
 @require_admin_api
 @require_csrf
 def api_admin_supabase_resume():
-    set_workspace_recovery_state("operation")
-    set_session_workspace_read_verified(False)
+    begin_workspace_recovery()
+    invalidate_session_workspace_read()
     try:
         request_supabase_project_restore()
     except SupabaseManagementError as error:

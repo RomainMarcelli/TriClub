@@ -52,6 +52,33 @@ def promote_to_admin(client):
         auth_session["role"] = "admin"
 
 
+def make_authenticated_client(app_module, password="test-user-password"):
+    auth_client = app_module.app.test_client()
+    auth_client.get("/login")
+    with auth_client.session_transaction() as login_session:
+        login_csrf = login_session["csrf_token"]
+    response = auth_client.post(
+        "/login",
+        data={"password": password, "csrf_token": login_csrf},
+    )
+    assert response.status_code == 302
+
+    with auth_client.session_transaction() as auth_session:
+        request_csrf = auth_session["csrf_token"]
+    original_open = auth_client.open
+
+    def open_with_csrf(*args, **kwargs):
+        method = str(kwargs.get("method", "GET")).upper()
+        if method in {"POST", "PUT", "PATCH", "DELETE"}:
+            headers = dict(kwargs.get("headers") or {})
+            headers.setdefault("X-CSRF-Token", request_csrf)
+            kwargs["headers"] = headers
+        return original_open(*args, **kwargs)
+
+    auth_client.open = open_with_csrf
+    return auth_client
+
+
 def test_pages_and_admin_api_require_the_expected_role(client):
     app_module = sys.modules["app"]
     anonymous = app_module.app.test_client()
@@ -191,6 +218,50 @@ def test_admin_restore_backups_current_state_and_invalidates_old_revision(client
     assert "before_admin_restore" in reasons
 
 
+def test_restore_requires_a_fresh_get_for_every_session(client):
+    app_module = sys.modules["app"]
+    initial = save(client, workspace("backup-version"), False)
+    revision_1 = initial.get_json()["revision"]
+    promote_to_admin(client)
+    manual_backup = client.post("/api/admin/backups", json={}).get_json()["backup"]
+
+    updated = save(client, workspace("current-version"), True, revision_1)
+    revision_before_restore = updated.get_json()["revision"]
+    assert client.get("/api/workspace").status_code == 200
+
+    client_b = make_authenticated_client(app_module)
+    loaded_b = client_b.get("/api/workspace")
+    assert loaded_b.status_code == 200
+    assert loaded_b.get_json()["revision"] == revision_before_restore
+    with client_b.session_transaction() as session_b:
+        epoch_b_before = session_b["workspace_read_epoch"]
+    server_epoch_before = app_module.WORKSPACE_READ_EPOCH
+
+    restored = client.post(
+        f"/api/admin/backups/{manual_backup['id']}/restore",
+        json={"confirm": "RESTORE"},
+    )
+    assert restored.status_code == 200
+    assert app_module.WORKSPACE_READ_EPOCH != server_epoch_before
+    loaded_a = client.get("/api/workspace")
+    assert loaded_a.status_code == 200
+    restored_revision = loaded_a.get_json()["revision"]
+
+    with client_b.session_transaction() as session_b:
+        assert session_b["workspace_read_epoch"] == epoch_b_before
+    blocked_b = save(client_b, workspace("stale-client-b"), True, revision_before_restore)
+    assert blocked_b.status_code == 428
+    assert blocked_b.get_json()["error"] == "workspace_fresh_read_required"
+
+    refreshed_b = client_b.get("/api/workspace")
+    assert refreshed_b.status_code == 200
+    assert refreshed_b.get_json()["revision"] == restored_revision
+    with client_b.session_transaction() as session_b:
+        assert session_b["workspace_read_epoch"] == app_module.WORKSPACE_READ_EPOCH
+    accepted_b = save(client_b, workspace("fresh-client-b"), True, restored_revision)
+    assert accepted_b.status_code == 200
+
+
 def test_restore_requires_admin_and_explicit_confirmation(client):
     assert save(client, workspace("A"), False).status_code == 200
     assert client.post("/api/admin/backups/1/restore", json={"confirm": "RESTORE"}).status_code == 403
@@ -292,6 +363,42 @@ def test_admin_resume_route_uses_server_side_management_call(client, monkeypatch
     response = client.post("/api/admin/supabase/resume", json={})
     assert response.status_code == 200
     assert calls == ["restore"]
+
+
+def test_resume_requires_a_fresh_get_for_every_session(client, monkeypatch):
+    app_module = sys.modules["app"]
+    initial = save(client, workspace("before-resume"), False)
+    revision = initial.get_json()["revision"]
+    assert client.get("/api/workspace").status_code == 200
+
+    client_b = make_authenticated_client(app_module)
+    loaded_b = client_b.get("/api/workspace")
+    assert loaded_b.status_code == 200
+    assert loaded_b.get_json()["revision"] == revision
+    with client_b.session_transaction() as session_b:
+        epoch_b_before = session_b["workspace_read_epoch"]
+    server_epoch_before = app_module.WORKSPACE_READ_EPOCH
+
+    promote_to_admin(client)
+    monkeypatch.setattr(app_module, "request_supabase_project_restore", lambda: None)
+    resumed = client.post("/api/admin/supabase/resume", json={})
+    assert resumed.status_code == 200
+    assert app_module.WORKSPACE_READ_EPOCH != server_epoch_before
+    assert client.get("/api/workspace").status_code == 200
+
+    with client_b.session_transaction() as session_b:
+        assert session_b["workspace_read_epoch"] == epoch_b_before
+    blocked_b = save(client_b, workspace("stale-after-resume"), True, revision)
+    assert blocked_b.status_code == 428
+    assert blocked_b.get_json()["error"] == "workspace_fresh_read_required"
+
+    refreshed_b = client_b.get("/api/workspace")
+    assert refreshed_b.status_code == 200
+    assert refreshed_b.get_json()["revision"] == revision
+    with client_b.session_transaction() as session_b:
+        assert session_b["workspace_read_epoch"] == app_module.WORKSPACE_READ_EPOCH
+    accepted_b = save(client_b, workspace("fresh-after-resume"), True, revision)
+    assert accepted_b.status_code == 200
 
 
 def test_management_restore_calls_official_endpoint_without_returning_token(client, monkeypatch):

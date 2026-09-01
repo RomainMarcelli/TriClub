@@ -186,6 +186,13 @@ write/admin permission. The browser never receives that token. After requesting
 resume, the UI polls with `GET /api/workspace`; persistence is re-enabled only
 after a successful full GET and hydration. No stale POST is sent first.
 
+The server rotates an in-memory workspace read epoch whenever a restore or
+Supabase resume starts. Every browser session must perform its own successful
+`GET /api/workspace` and receive the current epoch before it may write again.
+This is safe with the current Render command using one Gunicorn worker. If the
+application later uses multiple workers or instances, move the recovery state
+and read epoch to shared storage (for example PostgreSQL) before scaling out.
+
 ## Safe Production Rollout
 
 1. Take/verify an external Supabase backup according to the existing production procedure.

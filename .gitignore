@@ -6,3 +6,4 @@ __pycache__/
 *.pyd
 *.db
 data/*.db
+codex-workspace-fix.patch
